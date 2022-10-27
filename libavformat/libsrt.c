@@ -552,7 +552,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
             av_freep(&s->passphrase);
             s->passphrase = av_strndup(buf, strlen(buf));
         }
-        if (av_find_info_tag(buf, sizeof(buf), "", p)) {
+        if (av_find_info_tag(buf, sizeof(buf), "packetfilter", p)) {
             av_freep(&s->packetfilter);
             s->packetfilter = av_strndup(buf, strlen(buf));
         }

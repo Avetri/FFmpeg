@@ -102,6 +102,7 @@ typedef struct SRTContext {
     int tsbpd;
     char *packetfilter;
     enum SRTLogLevel loglevel;
+    int drifttracer;
 } SRTContext;
 
 #define D AV_OPT_FLAG_DECODING_PARAM
@@ -157,6 +158,7 @@ static const AVOption libsrt_options[] = {
     { "tsbpd",          "Timestamp-based packet delivery",                                      OFFSET(tsbpd),            AV_OPT_TYPE_BOOL,     { .i64 = -1 }, -1, 1,         .flags = D|E },
     { "packetfilter",   "SRT packet filter",                                                    OFFSET(packetfilter),     AV_OPT_TYPE_STRING,   { .str = NULL },              .flags = D|E },
     { "loglevel",       "libsrt logging level",                                                 OFFSET(loglevel),         AV_OPT_TYPE_INT,      { .i64 = SRT_LL_INVALID }, -1, INT_MAX, .flags = D|E, "loglevel" },
+    { "drifttracer",    "Enables or disables time drift tracer (receiver)",                     OFFSET(drifttracer),      AV_OPT_TYPE_BOOL,     { .i64 = -1 }, -1, 1,         .flags = D|E },
     { NULL }
 };
 
@@ -344,6 +346,7 @@ static int libsrt_set_options_pre(URLContext *h, int fd)
         (s->pbkeylen >= 0 && libsrt_setsockopt(h, fd, SRTO_PBKEYLEN, "SRTO_PBKEYLEN", &s->pbkeylen, sizeof(s->pbkeylen)) < 0) ||
         (s->passphrase && libsrt_setsockopt(h, fd, SRTO_PASSPHRASE, "SRTO_PASSPHRASE", s->passphrase, strlen(s->passphrase)) < 0) ||
         (s->packetfilter && libsrt_setsockopt(h, fd, SRTO_PACKETFILTER, "SRTO_PACKETFILTER", s->packetfilter, strlen(s->packetfilter)) < 0) ||
+        (s->drifttracer >= 0 && libsrt_setsockopt(h, fd, SRTO_DRIFTTRACER, "SRTO_DRIFTTRACER", &s->drifttracer, sizeof(s->drifttracer)) < 0) ||
 #if SRT_VERSION_VALUE >= 0x010302
 #if SRT_VERSION_VALUE >= 0x010401
         (s->enforced_encryption >= 0 && libsrt_setsockopt(h, fd, SRTO_ENFORCEDENCRYPTION, "SRTO_ENFORCEDENCRYPTION", &s->enforced_encryption, sizeof(s->enforced_encryption)) < 0) ||
@@ -582,6 +585,9 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
                 ret = AVERROR(EINVAL);
                 goto err;
             }
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "drifttracer", p)) {
+            s->drifttracer = strtol(buf, NULL, 10);
         }
 #if SRT_VERSION_VALUE >= 0x010302
         if (av_find_info_tag(buf, sizeof(buf), "enforced_encryption", p)) {

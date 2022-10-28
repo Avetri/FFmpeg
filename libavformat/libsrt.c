@@ -49,6 +49,15 @@ enum SRTMode {
     SRT_MODE_RENDEZVOUS = 2
 };
 
+enum SRTLogLevel {
+    SRT_LL_INVALID = -1,
+    SRT_LL_DEBUG = LOG_DEBUG,
+    SRT_LL_NOTICE = LOG_NOTICE,
+    SRT_LL_WARNING = LOG_WARNING,
+    SRT_LL_ERR = LOG_ERR,
+    SRT_LL_CRIT = LOG_CRIT
+};
+
 typedef struct SRTContext {
     const AVClass *class;
     int fd;
@@ -92,6 +101,7 @@ typedef struct SRTContext {
     int linger;
     int tsbpd;
     char *packetfilter;
+    enum SRTLogLevel loglevel;
 } SRTContext;
 
 #define D AV_OPT_FLAG_DECODING_PARAM
@@ -146,6 +156,7 @@ static const AVOption libsrt_options[] = {
     { "linger",         "Number of seconds that the socket waits for unsent data when closing", OFFSET(linger),           AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, INT_MAX,   .flags = D|E },
     { "tsbpd",          "Timestamp-based packet delivery",                                      OFFSET(tsbpd),            AV_OPT_TYPE_BOOL,     { .i64 = -1 }, -1, 1,         .flags = D|E },
     { "packetfilter",   "SRT packet filter",                                                    OFFSET(packetfilter),     AV_OPT_TYPE_STRING,   { .str = NULL },              .flags = D|E },
+    { "loglevel",       "libsrt logging level",                                                 OFFSET(loglevel),         AV_OPT_TYPE_INT,      { .i64 = SRT_LL_INVALID }, -1, INT_MAX, .flags = D|E, "loglevel" },
     { NULL }
 };
 
@@ -556,6 +567,22 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
             av_freep(&s->packetfilter);
             s->packetfilter = av_strndup(buf, strlen(buf));
         }
+        if (av_find_info_tag(buf, sizeof(buf), "loglevel", p)) {
+            if (!strcmp(buf, "fatal")) {
+                s->loglevel = SRT_LL_CRIT;
+            } else if (!strcmp(buf, "error")) {
+                s->loglevel = SRT_LL_ERR;
+            } else if (!strcmp(buf, "warning")) {
+                s->loglevel = SRT_LL_WARNING;
+            } else if (!strcmp(buf, "note")) {
+                s->loglevel = SRT_LL_NOTICE;
+            } else if (!strcmp(buf, "debug")) {
+                s->loglevel = SRT_LL_DEBUG;
+            } else {
+                ret = AVERROR(EINVAL);
+                goto err;
+            }
+        }
 #if SRT_VERSION_VALUE >= 0x010302
         if (av_find_info_tag(buf, sizeof(buf), "enforced_encryption", p)) {
             s->enforced_encryption = strtol(buf, NULL, 10);
@@ -669,6 +696,9 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         if (av_find_info_tag(buf, sizeof(buf), "linger", p)) {
             s->linger = strtol(buf, NULL, 10);
         }
+    }
+    if (SRT_LL_INVALID != s->loglevel) {
+        srt_setloglevel(s->loglevel);
     }
     ret = libsrt_setup(h, uri, flags);
     if (ret < 0)

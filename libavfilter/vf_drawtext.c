@@ -1042,6 +1042,18 @@ static int func_metadata(AVFilterContext *ctx, AVBPrint *bp,
     return 0;
 }
 
+static int func_localtime_ms(AVFilterContext *ctx, AVBPrint *bp,
+                         char *fct, unsigned argc, char **argv, int tag)
+{
+    int64_t mstoday = (av_gettime() / 1000) % (24 * 60 * 60 * 1000);
+    av_bprintf(bp, "%02d:%02d:%02d.%03d",
+                       (int)(mstoday / (60 * 60 * 1000)),
+                       (int)(mstoday / (60 * 1000)) % 60,
+                       (int)(mstoday / 1000) % 60,
+                       (int)(mstoday % 1000));
+    return 0;
+}
+
 static int func_strftime(AVFilterContext *ctx, AVBPrint *bp,
                          char *fct, unsigned argc, char **argv, int tag)
 {
@@ -1217,6 +1229,7 @@ static const struct drawtext_function {
     { "pts",       0, 3, 0,   func_pts      },
     { "gmtime",    0, 1, 'G', func_strftime },
     { "localtime", 0, 1, 'L', func_strftime },
+    { "localtime_ms", 0, 0, 0, func_localtime_ms },
     { "frame_num", 0, 0, 0,   func_frame_num },
     { "n",         0, 0, 0,   func_frame_num },
     { "metadata",  1, 2, 0,   func_metadata },

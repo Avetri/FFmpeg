@@ -58,11 +58,21 @@ enum SRTLogLevel {
     SRT_LL_CRIT = LOG_CRIT
 };
 
+typedef enum SRTOnFail
+{
+    SRT_OF_ABORT,
+    SRT_OF_CONNECT,
+    SRT_OF_INVALID
+} SRTOnFail;
+
 typedef struct SRTContext {
     const AVClass *class;
     int fd;
     int eid;
     int64_t rw_timeout;
+    SRTOnFail onfail;
+    char * uri;
+    int flags;
     int64_t listen_timeout;
     int recv_buffer_size;
     int send_buffer_size;
@@ -110,6 +120,9 @@ typedef struct SRTContext {
 #define OFFSET(x) offsetof(SRTContext, x)
 static const AVOption libsrt_options[] = {
     { "timeout",        "Timeout of socket I/O operations (in microseconds)",                   OFFSET(rw_timeout),       AV_OPT_TYPE_INT64, { .i64 = -1 }, -1, INT64_MAX, .flags = D|E },
+    { "onfail",         "The reaction type for a tramsmission fail",                            OFFSET(onfail),           AV_OPT_TYPE_INT,      { .i64 = SRT_OF_INVALID }, SRT_OF_ABORT, SRT_OF_INVALID, .flags = D|E, "onfail" },
+    { "abort",           NULL, 0, AV_OPT_TYPE_CONST,  { .i64 = SRT_OF_ABORT },   INT_MIN, INT_MAX, .flags = D|E, "onfail" },
+    { "connect",         NULL, 0, AV_OPT_TYPE_CONST,  { .i64 = SRT_OF_CONNECT }, INT_MIN, INT_MAX, .flags = D|E, "onfail" },
     { "listen_timeout", "Connection awaiting timeout (in microseconds)" ,                       OFFSET(listen_timeout),   AV_OPT_TYPE_INT64, { .i64 = -1 }, -1, INT64_MAX, .flags = D|E },
     { "send_buffer_size", "Socket send buffer size (in bytes)",                                 OFFSET(send_buffer_size), AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, INT_MAX,   .flags = D|E },
     { "recv_buffer_size", "Socket receive buffer size (in bytes)",                              OFFSET(recv_buffer_size), AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, INT_MAX,   .flags = D|E },
@@ -294,7 +307,7 @@ static int libsrt_listen_connect(int eid, int fd, const struct sockaddr *addr, s
                    "Connection to %s failed (%s), trying next address\n",
                    h->filename, av_err2str(ret));
         } else {
-            av_log(h, AV_LOG_ERROR, "Connection to %s failed: %s\n",
+            av_log(h, AV_LOG_WARNING, "Connection to %s failed: %s\n",
                    h->filename, av_err2str(ret));
         }
     }
@@ -527,6 +540,13 @@ static int libsrt_setup(URLContext *h, const char *uri, int flags)
     return 0;
 
  fail:
+    if (s->onfail == SRT_OF_CONNECT) {
+        av_log(h, AV_LOG_WARNING, "Reconnecting on a connection setuping failure ...\n");
+        if (fd >= 0)
+            srt_close(fd);
+        ret = 0;
+        goto restart;
+    }
     if (cur_ai->ai_next) {
         /* Retry with the next sockaddr */
         cur_ai = cur_ai->ai_next;
@@ -552,6 +572,10 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
     if (srt_startup() < 0) {
         return AVERROR_UNKNOWN;
     }
+
+    av_freep(&s->uri);
+    s->uri = av_strndup(uri, strlen(uri));
+    s->flags = flags;
 
     /* SRT options (srt/srt.h) */
     p = strchr(uri, '?');
@@ -699,6 +723,16 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
                 goto err;
             }
         }
+        if (av_find_info_tag(buf, sizeof(buf), "onfail", p)) {
+            if (!strcmp(buf, "abort")) {
+                s->onfail = SRT_OF_ABORT;
+            } else if (!strcmp(buf, "connect")) {
+                s->onfail = SRT_OF_CONNECT;
+            } else {
+                ret = AVERROR(EINVAL);
+                goto err;
+            }
+        }
         if (av_find_info_tag(buf, sizeof(buf), "linger", p)) {
             s->linger = strtol(buf, NULL, 10);
         }
@@ -723,17 +757,25 @@ static int libsrt_read(URLContext *h, uint8_t *buf, int size)
     SRTContext *s = h->priv_data;
     int ret;
 
+reread:
     if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
         ret = libsrt_network_wait_fd_timeout(h, s->eid, 0, h->rw_timeout, &h->interrupt_callback);
         if (ret)
-            return ret;
+            goto fail_read;
     }
 
     ret = srt_recvmsg(s->fd, buf, size);
     if (ret < 0) {
         ret = libsrt_neterrno(h);
+        goto fail_read;
     }
 
+    return ret;
+fail_read:
+    if (s->onfail == SRT_OF_CONNECT && 0 == libsrt_setup(h, s->uri, s->flags)) {
+        av_log(h, AV_LOG_WARNING, "Reconnecting on a reading failure ...\n");
+        goto reread;
+    }
     return ret;
 }
 
@@ -742,17 +784,26 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
     SRTContext *s = h->priv_data;
     int ret;
 
+rewrite:
     if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
         ret = libsrt_network_wait_fd_timeout(h, s->eid, 1, h->rw_timeout, &h->interrupt_callback);
         if (ret)
-            return ret;
+            goto fail_write;
     }
 
     ret = srt_sendmsg(s->fd, buf, size, -1, 1);
     if (ret < 0) {
         ret = libsrt_neterrno(h);
+        goto fail_write;
     }
-
+    return ret;
+fail_write:
+    if (s->onfail == SRT_OF_CONNECT) {
+        av_log(h, AV_LOG_WARNING, "Reconnecting on a writing failure ...\n");
+        if (0 == libsrt_setup(h, s->uri, s->flags)) {
+            goto rewrite;
+        }
+    }
     return ret;
 }
 

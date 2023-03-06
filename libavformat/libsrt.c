@@ -22,10 +22,17 @@
  */
 
 #include <srt/srt.h>
+#include <limits.h>
+
+#include <stdatomic.h>
 
 #include "libavutil/opt.h"
 #include "libavutil/parseutils.h"
 #include "libavutil/time.h"
+#include "libavutil/thread.h"
+#include "libavutil/fifo.h"
+#include "libavutil/avassert.h"
+#include "libavutil/intreadwrite.h"
 
 #include "avformat.h"
 #include "internal.h"
@@ -73,6 +80,12 @@ typedef struct SRTContext {
     SRTOnFail onfail;
     char * uri;
     int flags;
+    int write;
+    AVFifo * fifo;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    pthread_t thread;
+    atomic_bool alive;
     int64_t listen_timeout;
     int recv_buffer_size;
     int send_buffer_size;
@@ -409,7 +422,7 @@ static int libsrt_set_options_pre(URLContext *h, int fd)
 }
 
 
-static int libsrt_setup(URLContext *h, const char *uri, int flags)
+static int libsrt_setup(URLContext *h)
 {
     struct addrinfo hints = { 0 }, *ai, *cur_ai;
     int port, fd;
@@ -421,6 +434,11 @@ static int libsrt_setup(URLContext *h, const char *uri, int flags)
     char portstr[10];
     int64_t open_timeout = 0;
     int eid, write_eid;
+    const char *uri;
+    int flags;
+
+    uri = s->uri;
+    flags = s->flags;
 
     av_url_split(proto, sizeof(proto), NULL, 0, hostname, sizeof(hostname),
         &port, path, sizeof(path), uri);
@@ -562,22 +580,301 @@ static int libsrt_setup(URLContext *h, const char *uri, int flags)
     return ret;
 }
 
+#define max(a,b)             \
+({                           \
+    __typeof__ (a) _a = (a); \
+    __typeof__ (b) _b = (b); \
+    _a > _b ? _a : _b;       \
+})
+
+#define min(a,b)             \
+({                           \
+    __typeof__ (a) _a = (a); \
+    __typeof__ (b) _b = (b); \
+    _a < _b ? _a : _b;       \
+})
+
+static void * libsrt_thread(void * data)
+{
+    URLContext *h = (URLContext *)data;
+    SRTContext *s = (SRTContext *)h->priv_data;
+    int connected = 0;
+    atomic_bool etalon = ATOMIC_VAR_INIT(1);
+    // char car[SRT_LIVE_MAX_PAYLOAD_SIZE + 2];
+    char car[USHRT_MAX];
+    char car_for_size[2];
+    int err_code = 0;
+    int size = 0;
+    const char * p;
+    char buf[1024];
+    int ret;
+    char *uri = s->uri;
+    // int flags = s->flags;
+
+    if (srt_startup() < 0) {
+        return NULL;
+    }
+
+    p = strchr(uri, '?');
+    if (p) {
+        if (av_find_info_tag(buf, sizeof(buf), "maxbw", p)) {
+            s->maxbw = strtoll(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "pbkeylen", p)) {
+            s->pbkeylen = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "passphrase", p)) {
+            av_freep(&s->passphrase);
+            s->passphrase = av_strndup(buf, strlen(buf));
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "packetfilter", p)) {
+            av_freep(&s->packetfilter);
+            s->packetfilter = av_strndup(buf, strlen(buf));
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "loglevel", p)) {
+            if (!strcmp(buf, "fatal")) {
+                s->loglevel = SRT_LL_CRIT;
+            } else if (!strcmp(buf, "error")) {
+                s->loglevel = SRT_LL_ERR;
+            } else if (!strcmp(buf, "warning")) {
+                s->loglevel = SRT_LL_WARNING;
+            } else if (!strcmp(buf, "note")) {
+                s->loglevel = SRT_LL_NOTICE;
+            } else if (!strcmp(buf, "debug")) {
+                s->loglevel = SRT_LL_DEBUG;
+            } else {
+                ret = AVERROR(EINVAL);
+                return NULL;
+            }
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "drifttracer", p)) {
+            s->drifttracer = strtol(buf, NULL, 10);
+        }
+#if SRT_VERSION_VALUE >= 0x010302
+        if (av_find_info_tag(buf, sizeof(buf), "enforced_encryption", p)) {
+            s->enforced_encryption = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "kmrefreshrate", p)) {
+            s->kmrefreshrate = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "kmpreannounce", p)) {
+            s->kmpreannounce = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "snddropdelay", p)) {
+            s->snddropdelay = strtoll(buf, NULL, 10);
+        }
+#endif
+        if (av_find_info_tag(buf, sizeof(buf), "mss", p)) {
+            s->mss = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "ffs", p)) {
+            s->ffs = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "ipttl", p)) {
+            s->ipttl = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "iptos", p)) {
+            s->iptos = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "inputbw", p)) {
+            s->inputbw = strtoll(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "oheadbw", p)) {
+            s->oheadbw = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "latency", p)) {
+            s->latency = strtoll(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "tsbpddelay", p)) {
+            s->latency = strtoll(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "rcvlatency", p)) {
+            s->rcvlatency = strtoll(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "peerlatency", p)) {
+            s->peerlatency = strtoll(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "tlpktdrop", p)) {
+            s->tlpktdrop = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "nakreport", p)) {
+            s->nakreport = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "connect_timeout", p)) {
+            s->connect_timeout = strtoll(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "payload_size", p) ||
+            av_find_info_tag(buf, sizeof(buf), "pkt_size", p)) {
+            s->payload_size = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "mode", p)) {
+            if (!strcmp(buf, "caller")) {
+                s->mode = SRT_MODE_CALLER;
+            } else if (!strcmp(buf, "listener")) {
+                s->mode = SRT_MODE_LISTENER;
+            } else if (!strcmp(buf, "rendezvous")) {
+                s->mode = SRT_MODE_RENDEZVOUS;
+            } else {
+                ret = AVERROR(EINVAL);
+                return NULL;
+            }
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "sndbuf", p)) {
+            s->sndbuf = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "rcvbuf", p)) {
+            s->rcvbuf = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "lossmaxttl", p)) {
+            s->lossmaxttl = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "minversion", p)) {
+            s->minversion = strtol(buf, NULL, 0);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "streamid", p)) {
+            av_freep(&s->streamid);
+            s->streamid = av_strdup(buf);
+            if (!s->streamid) {
+                ret = AVERROR(ENOMEM);
+                return NULL;
+            }
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "smoother", p)) {
+            av_freep(&s->smoother);
+            s->smoother = av_strdup(buf);
+            if(!s->smoother) {
+                ret = AVERROR(ENOMEM);
+                return NULL;
+            }
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "messageapi", p)) {
+            s->messageapi = strtol(buf, NULL, 10);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "transtype", p)) {
+            if (!strcmp(buf, "live")) {
+                s->transtype = SRTT_LIVE;
+            } else if (!strcmp(buf, "file")) {
+                s->transtype = SRTT_FILE;
+            } else {
+                ret = AVERROR(EINVAL);
+                return NULL;
+            }
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "onfail", p)) {
+            if (!strcmp(buf, "abort")) {
+                s->onfail = SRT_OF_ABORT;
+            } else if (!strcmp(buf, "connect")) {
+                s->onfail = SRT_OF_CONNECT;
+            } else {
+                ret = AVERROR(EINVAL);
+                return NULL;
+            }
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "linger", p)) {
+            s->linger = strtol(buf, NULL, 10);
+        }
+    }
+    if (SRT_LL_INVALID != s->loglevel) {
+        srt_setloglevel(s->loglevel);
+    }
+
+    pthread_mutex_lock(&s->mutex);
+
+    while (1 == atomic_compare_exchange_strong(&s->alive, &etalon, 1))
+    {
+        int len;
+        char *ptr;
+
+        if (0 == connected && 0 == libsrt_setup(h)) {
+            connected = 1;
+        }
+        if (0 == connected) {
+            av_fifo_reset2(s->fifo);
+            continue;
+        }
+
+        len = av_fifo_can_read(s->fifo);
+
+        while (len<2) {
+            if (1 != atomic_compare_exchange_strong(&s->alive, &etalon, 1)) {
+                pthread_mutex_unlock(&s->mutex);
+                goto end;
+            }
+            pthread_cond_wait(&s->cond, &s->mutex);
+            len = av_fifo_can_read(s->fifo);
+        }
+
+        av_fifo_read(s->fifo, car_for_size, 2);
+        size = AV_RL16(car_for_size);
+        av_assert0(0 <= size);
+        av_assert0(USHRT_MAX >= size);
+        av_assert0(av_fifo_can_read(s->fifo) >= size);
+        av_fifo_read(s->fifo, car, size);
+        pthread_mutex_unlock(&s->mutex);
+        av_log(h, AV_LOG_ERROR, "Read %d bytes from FIFO.\n", 2+size);
+
+        if (0 >= size) {
+            pthread_mutex_lock(&s->mutex);
+            continue;
+        }
+
+        if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
+            err_code = libsrt_network_wait_fd_timeout(h, s->eid, 1, h->rw_timeout, &h->interrupt_callback);
+            if (0 != err_code) {
+                if (s->fd >= 0) {
+                    srt_close(s->fd);
+                }
+                connected = 0;
+                pthread_mutex_lock(&s->mutex);
+                continue;
+            }
+        }
+
+        ptr = car;
+        while (ptr - car < size) {
+            int to_write = min(SRT_LIVE_DEFAULT_PAYLOAD_SIZE, size-(ptr-car));
+            err_code = srt_sendmsg(s->fd, car, to_write, -1, 1);
+            // av_log(h, AV_LOG_ERROR, "srt_sendmsg() sent %d bytes of %d, ptr-car = %ld.\n", err_code, to_write, ptr-car);
+            if (0 > err_code) {
+                err_code = libsrt_neterrno(h);
+                if (s->fd >= 0) {
+                    srt_close(s->fd);
+                }
+                connected = 0;
+                break;
+            } else {
+                ptr = ptr + err_code;
+            }
+        }
+        pthread_mutex_lock(&s->mutex);
+    }
+
+end:
+    srt_epoll_release(s->eid);
+    srt_close(s->fd);
+
+    srt_cleanup();
+    return NULL;
+}
+
 static int libsrt_open(URLContext *h, const char *uri, int flags)
 {
     SRTContext *s = h->priv_data;
+    /*
     const char * p;
     char buf[1024];
+    */
     int ret = 0;
-
-    if (srt_startup() < 0) {
-        return AVERROR_UNKNOWN;
-    }
 
     av_freep(&s->uri);
     s->uri = av_strndup(uri, strlen(uri));
     s->flags = flags;
 
-    /* SRT options (srt/srt.h) */
+/*
+    if (srt_startup() < 0) {
+        return AVERROR_UNKNOWN;
+    }
+
     p = strchr(uri, '?');
     if (p) {
         if (av_find_info_tag(buf, sizeof(buf), "maxbw", p)) {
@@ -740,15 +1037,38 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
     if (SRT_LL_INVALID != s->loglevel) {
         srt_setloglevel(s->loglevel);
     }
-    ret = libsrt_setup(h, uri, flags);
-    if (ret < 0)
-        goto err;
+    */
+    atomic_store(&s->alive, 1);
+    if (AVIO_FLAG_READ == (AVIO_FLAG_READ & flags) && AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
+        atomic_store(&s->alive, 0);
+        av_log(h, AV_LOG_FATAL, "I am an output and an input both!\n");
+        return AVERROR_UNKNOWN;
+    } else if (AVIO_FLAG_READ == (AVIO_FLAG_READ & flags) || AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
+        if (AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
+            s->write = 1;
+        }
+        if (0 != pthread_mutex_init(&s->mutex, NULL)) {
+            av_log(h, AV_LOG_FATAL, "I am nor an output neither an input!\n");
+            return AVERROR_UNKNOWN;
+        }
+        pthread_cond_init(&s->cond, NULL);
+        // s->fifo = av_fifo_alloc2(8, SRT_LIVE_MAX_PAYLOAD_SIZE+4, 0);
+        s->fifo = av_fifo_alloc2(188*7*128, 1, 0);
+        pthread_create(&s->thread, NULL, libsrt_thread, h);
+    } else {
+        atomic_store(&s->alive, 0);
+        av_log(h, AV_LOG_FATAL, "I am nor an output neither an input!\n");
+        return AVERROR_UNKNOWN;
+    }
+    // ret = libsrt_setup(h, uri, flags);
+    // if (ret < 0)
+    //     goto err;
     return 0;
 
 err:
     av_freep(&s->smoother);
     av_freep(&s->streamid);
-    srt_cleanup();
+    // srt_cleanup();
     return ret;
 }
 
@@ -756,6 +1076,10 @@ static int libsrt_read(URLContext *h, uint8_t *buf, int size)
 {
     SRTContext *s = h->priv_data;
     int ret;
+
+    if (1 == s->write) {
+        av_log(h, AV_LOG_FATAL, "I am an output, not input!\n");
+    }
 
 reread:
     if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
@@ -772,7 +1096,7 @@ reread:
 
     return ret;
 fail_read:
-    if (s->onfail == SRT_OF_CONNECT && 0 == libsrt_setup(h, s->uri, s->flags)) {
+    if (s->onfail == SRT_OF_CONNECT && 0 == libsrt_setup(h)) {
         av_log(h, AV_LOG_WARNING, "Reconnecting on a reading failure ...\n");
         goto reread;
     }
@@ -783,27 +1107,31 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
 {
     SRTContext *s = h->priv_data;
     int ret;
+    char car_of_size[2];
 
-rewrite:
-    if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
-        ret = libsrt_network_wait_fd_timeout(h, s->eid, 1, h->rw_timeout, &h->interrupt_callback);
-        if (ret)
-            goto fail_write;
+    av_assert0(0 <= size);
+    av_assert0(USHRT_MAX >= size);
+
+    av_log(h, AV_LOG_ERROR, "Want to write %d bytes to SRT.\n", size);
+
+    if (0 == s->write) {
+        av_log(h, AV_LOG_FATAL, "I am an input, not output!\n");
     }
 
-    ret = srt_sendmsg(s->fd, buf, size, -1, 1);
-    if (ret < 0) {
-        ret = libsrt_neterrno(h);
-        goto fail_write;
+    pthread_mutex_lock(&s->mutex);
+    if (av_fifo_can_write(s->fifo) >= size+2) {
+        AV_WL16(car_of_size, size);
+        av_fifo_write(s->fifo, car_of_size, 2);
+        av_fifo_write(s->fifo, buf, size);
+        pthread_cond_signal(&s->cond);
+        pthread_mutex_unlock(&s->mutex);
+        av_log(h, AV_LOG_ERROR, "Wrote %d bytes to FIFO.\n", 2+size);
+    } else {
+        pthread_mutex_unlock(&s->mutex);
+        av_log(h, AV_LOG_WARNING, "Out of memory in FIFO.\n");
     }
-    return ret;
-fail_write:
-    if (s->onfail == SRT_OF_CONNECT) {
-        av_log(h, AV_LOG_WARNING, "Reconnecting on a writing failure ...\n");
-        if (0 == libsrt_setup(h, s->uri, s->flags)) {
-            goto rewrite;
-        }
-    }
+    ret = size;
+
     return ret;
 }
 
@@ -811,10 +1139,15 @@ static int libsrt_close(URLContext *h)
 {
     SRTContext *s = h->priv_data;
 
-    srt_epoll_release(s->eid);
-    srt_close(s->fd);
+    atomic_store(&s->alive, 0);
+    pthread_join(s->thread, NULL);
+    pthread_cond_destroy(&s->cond);
+    pthread_mutex_destroy(&s->mutex);
+    av_fifo_freep2(&s->fifo);
+    // srt_epoll_release(s->eid);
+    // srt_close(s->fd);
 
-    srt_cleanup();
+    // srt_cleanup();
 
     return 0;
 }

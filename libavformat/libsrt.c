@@ -597,7 +597,11 @@ static void * libsrt_thread(void * data)
     {
         int len;
 
-        if (0 == connected && 0 == libsrt_setup(h)) {
+        if (0 == connected && SRT_OF_ABORT == s->onfail) {
+            pthread_mutex_unlock(&s->mutex);
+            break;
+        }
+        if (0 == connected && SRT_OF_CONNECT == s->onfail && 0 == libsrt_setup(h)) {
             connected = 1;
         }
         if (0 == connected) {

@@ -580,6 +580,20 @@ static int libsrt_setup(URLContext *h)
     return ret;
 }
 
+#define max(a,b)             \
+({                           \
+    __typeof__ (a) _a = (a); \
+    __typeof__ (b) _b = (b); \
+    _a > _b ? _a : _b;       \
+})
+
+#define min(a,b)             \
+({                           \
+    __typeof__ (a) _a = (a); \
+    __typeof__ (b) _b = (b); \
+    _a < _b ? _a : _b;       \
+})
+
 static void * libsrt_thread(void * data)
 {
     URLContext *h = (URLContext *)data;
@@ -591,14 +605,11 @@ static void * libsrt_thread(void * data)
     int err_code = 0;
     int size = 0;
 
-    pthread_mutex_lock(&s->mutex);
-
     while (1 == atomic_compare_exchange_strong(&s->alive, &etalon, 1))
     {
         int len;
 
         if (0 == connected && SRT_OF_ABORT == s->onfail) {
-            pthread_mutex_unlock(&s->mutex);
             break;
         }
         if (0 == connected && SRT_OF_CONNECT == s->onfail && 0 == libsrt_setup(h)) {
@@ -609,40 +620,65 @@ static void * libsrt_thread(void * data)
             continue;
         }
 
-        len = av_fifo_can_read(s->fifo);
+        pthread_mutex_lock(&s->mutex);
 
-        while (len<2) {
-            if (1 != atomic_compare_exchange_strong(&s->alive, &etalon, 1)) {
-                pthread_mutex_unlock(&s->mutex);
-                goto end;
+        if (1 == s->write)
+        {
+            while (2 > (len = av_fifo_can_read(s->fifo))) {
+                if (1 != atomic_compare_exchange_strong(&s->alive, &etalon, 1)) {
+                    pthread_mutex_unlock(&s->mutex);
+                    goto end;
+                }
+                pthread_cond_wait(&s->cond, &s->mutex);
+                len = av_fifo_can_read(s->fifo);
             }
-            pthread_cond_wait(&s->cond, &s->mutex);
-            len = av_fifo_can_read(s->fifo);
-        }
 
-        av_fifo_read(s->fifo, car_for_size, 2);
-        size = AV_RL16(car_for_size);
-        av_assert0(0 <= size);
-        av_assert0(USHRT_MAX >= size);
-        av_assert0(av_fifo_can_read(s->fifo) >= size);
-        av_fifo_read(s->fifo, car, size);
-        pthread_mutex_unlock(&s->mutex);
+            av_fifo_read(s->fifo, car_for_size, 2);
+            size = AV_RL16(car_for_size);
+            av_assert0(0 <= size);
+            av_assert0(USHRT_MAX >= size);
+            av_assert0(av_fifo_can_read(s->fifo) >= size);
+            av_fifo_read(s->fifo, car, size);
+            pthread_mutex_unlock(&s->mutex);
 
-        if (0 >= size) {
-            pthread_mutex_lock(&s->mutex);
-            continue;
+            if (0 >= size) {
+                continue;
+            }
+        } else {
+            pthread_mutex_unlock(&s->mutex);
         }
 
         if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
-            err_code = libsrt_network_wait_fd_timeout(h, s->eid, 1, h->rw_timeout, &h->interrupt_callback);
+            err_code = libsrt_network_wait_fd_timeout(h, s->eid, s->write, h->rw_timeout, &h->interrupt_callback);
             if (0 != err_code) {
                 if (s->fd >= 0) {
                     srt_close(s->fd);
                 }
                 connected = 0;
-                pthread_mutex_lock(&s->mutex);
                 continue;
             }
+        }
+
+        if (0 == s->write)
+        {
+            int avail;
+            pthread_mutex_lock(&s->mutex);
+            avail = av_fifo_can_write(s->fifo);
+            if (188+2 > avail) {
+                continue;
+            }
+            err_code = srt_recvmsg(s->fd, car, avail);
+            if (0 > err_code) {
+                err_code = libsrt_neterrno(h);
+                srt_close(s->fd);
+            } else {
+                AV_WL16(car_for_size, err_code);
+                av_fifo_write(s->fifo, car_for_size, 2);
+                av_fifo_write(s->fifo, car, err_code);
+                pthread_cond_signal(&s->cond);
+            }
+            pthread_mutex_unlock(&s->mutex);
+            continue;
         }
 
         err_code = srt_sendmsg(s->fd, car, size, -1, 1);
@@ -653,7 +689,6 @@ static void * libsrt_thread(void * data)
             }
             connected = 0;
         }
-        pthread_mutex_lock(&s->mutex);
     }
 
 end:
@@ -848,6 +883,10 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         av_log(h, AV_LOG_FATAL, "I am an output and an input both!\n");
         return AVERROR_UNKNOWN;
     } else if (AVIO_FLAG_READ == (AVIO_FLAG_READ & flags) || AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
+        ret = libsrt_setup(h);
+        if (ret < 0) {
+            goto err;
+        }
         if (AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
             s->write = 1;
         }
@@ -863,9 +902,6 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         av_log(h, AV_LOG_FATAL, "I am nor an output neither an input!\n");
         return AVERROR_UNKNOWN;
     }
-    ret = libsrt_setup(h);
-    if (ret < 0)
-        goto err;
     return 0;
 
 err:
@@ -877,33 +913,51 @@ err:
 
 static int libsrt_read(URLContext *h, uint8_t *buf, int size)
 {
-    //TODO: Move this reading to the thread.
     SRTContext *s = h->priv_data;
     int ret;
+    char car_of_size[2];
+    int len;
+    int unloop = 0;
+
+    av_assert0(0 <= size);
 
     if (1 == s->write) {
         av_log(h, AV_LOG_FATAL, "I am an output, not input!\n");
     }
 
-reread:
-    if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
-        ret = libsrt_network_wait_fd_timeout(h, s->eid, 0, h->rw_timeout, &h->interrupt_callback);
-        if (ret)
-            goto fail_read;
+    pthread_mutex_lock(&s->mutex);
+    for (;;)
+    {
+        if (av_fifo_can_read(s->fifo) >= 2) {
+            av_fifo_peek(s->fifo, car_of_size, 2, 0);
+            len = AV_RL16(car_of_size);
+            av_assert0(0 <= len);
+            av_assert0(USHRT_MAX >= len);
+            av_assert0(len + 2 <= av_fifo_can_read(s->fifo));
+            av_fifo_drain2(s->fifo, 2);//skip the length.
+            av_fifo_read(s->fifo, buf, min(len, size));
+            if (size < len) {
+                av_log(h, AV_LOG_WARNING, "A part of datagram lost because of limited buffer size.\n");
+                av_fifo_drain2(s->fifo, len-size);//Skip the rest
+            }
+            pthread_mutex_unlock(&s->mutex);
+            return min(len, size);
+        } else if (1 == unloop || (h->flags & AVIO_FLAG_NONBLOCK)) {
+            pthread_mutex_unlock(&s->mutex);
+            return AVERROR(EAGAIN);
+        } else {
+            int64_t t = av_gettime() + 100000;
+            struct timespec tv = { .tv_sec  =  t / 1000000,
+                                    .tv_nsec = (t % 1000000) * 1000 };
+            int err = pthread_cond_timedwait(&s->cond, &s->mutex, &tv);
+            if (err) {
+                pthread_mutex_unlock(&s->mutex);
+                return AVERROR(err == ETIMEDOUT ? EAGAIN : err);
+            }
+            unloop = 1;
+        }
     }
 
-    ret = srt_recvmsg(s->fd, buf, size);
-    if (ret < 0) {
-        ret = libsrt_neterrno(h);
-        goto fail_read;
-    }
-
-    return ret;
-fail_read:
-    if (s->onfail == SRT_OF_CONNECT && 0 == libsrt_setup(h)) {
-        av_log(h, AV_LOG_WARNING, "Reconnecting on a reading failure ...\n");
-        goto reread;
-    }
     return ret;
 }
 

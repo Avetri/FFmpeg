@@ -24,8 +24,6 @@
 #include <srt/srt.h>
 #include <limits.h>
 
-#include <stdatomic.h>
-
 #include "libavutil/opt.h"
 #include "libavutil/parseutils.h"
 #include "libavutil/time.h"
@@ -85,7 +83,7 @@ typedef struct SRTContext {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     pthread_t thread;
-    atomic_bool alive;
+    int evac;
     int64_t listen_timeout;
     int recv_buffer_size;
     int send_buffer_size;
@@ -599,13 +597,12 @@ static void * libsrt_thread(void * data)
     URLContext *h = (URLContext *)data;
     SRTContext *s = (SRTContext *)h->priv_data;
     int connected = 1;
-    atomic_bool etalon = ATOMIC_VAR_INIT(1);
     char car[USHRT_MAX];
     char car_for_size[2];
     int err_code = 0;
     int size = 0;
 
-    while (1 == atomic_compare_exchange_strong(&s->alive, &etalon, 1))
+    for (;;)
     {
         int len;
 
@@ -625,7 +622,7 @@ static void * libsrt_thread(void * data)
         if (1 == s->write)
         {
             while (2 > (len = av_fifo_can_read(s->fifo))) {
-                if (1 != atomic_compare_exchange_strong(&s->alive, &etalon, 1)) {
+                if (1 == s->evac) {
                     pthread_mutex_unlock(&s->mutex);
                     goto end;
                 }
@@ -663,6 +660,10 @@ static void * libsrt_thread(void * data)
         {
             int avail;
             pthread_mutex_lock(&s->mutex);
+            if (1 == s->evac) {
+                pthread_mutex_unlock(&s->mutex);
+                goto end;
+            }
             avail = av_fifo_can_write(s->fifo);
             if (188+2 > avail) {
                 continue;
@@ -671,6 +672,7 @@ static void * libsrt_thread(void * data)
             if (0 > err_code) {
                 err_code = libsrt_neterrno(h);
                 srt_close(s->fd);
+                connected = 0;
             } else {
                 AV_WL16(car_for_size, err_code);
                 av_fifo_write(s->fifo, car_for_size, 2);
@@ -694,8 +696,8 @@ static void * libsrt_thread(void * data)
 end:
     srt_epoll_release(s->eid);
     srt_close(s->fd);
-
     srt_cleanup();
+
     return NULL;
 }
 
@@ -709,6 +711,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
     av_freep(&s->uri);
     s->uri = av_strndup(uri, strlen(uri));
     s->flags = flags;
+    s->evac = 0;
 
     if (srt_startup() < 0) {
         return AVERROR_UNKNOWN;
@@ -877,9 +880,9 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         srt_setloglevel(s->loglevel);
     }
 
-    atomic_store(&s->alive, 1);
+    s->evac = 0;
     if (AVIO_FLAG_READ == (AVIO_FLAG_READ & flags) && AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
-        atomic_store(&s->alive, 0);
+        s->evac = 1;
         av_log(h, AV_LOG_FATAL, "I am an output and an input both!\n");
         return AVERROR_UNKNOWN;
     } else if (AVIO_FLAG_READ == (AVIO_FLAG_READ & flags) || AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
@@ -898,7 +901,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         s->fifo = av_fifo_alloc2(188*7*128, 1, 0);
         pthread_create(&s->thread, NULL, libsrt_thread, h);
     } else {
-        atomic_store(&s->alive, 0);
+        s->evac = 1;
         av_log(h, AV_LOG_FATAL, "I am nor an output neither an input!\n");
         return AVERROR_UNKNOWN;
     }
@@ -992,14 +995,20 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
 
 static int libsrt_close(URLContext *h)
 {
-    //FIXME: Normalize closing on a signal.
     SRTContext *s = h->priv_data;
 
-    atomic_store(&s->alive, 0);
+    av_log(h, AV_LOG_ERROR, "%s() start.\n", __FUNCTION__);
+
+    pthread_mutex_lock(&s->mutex);
+    s->evac = 1;
+    pthread_cond_signal(&s->cond);
+    pthread_mutex_unlock(&s->mutex);
+
     pthread_join(s->thread, NULL);
     pthread_cond_destroy(&s->cond);
     pthread_mutex_destroy(&s->mutex);
     av_fifo_freep2(&s->fifo);
+    av_log(h, AV_LOG_ERROR, "%s() end.\n", __FUNCTION__);
 
     return 0;
 }

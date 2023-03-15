@@ -76,6 +76,7 @@ typedef struct SRTContext {
     int eid;
     int64_t rw_timeout;
     SRTOnFail onfail;
+    int connected;
     char * uri;
     int flags;
     int write;
@@ -130,7 +131,7 @@ typedef struct SRTContext {
 #define E AV_OPT_FLAG_ENCODING_PARAM
 #define OFFSET(x) offsetof(SRTContext, x)
 static const AVOption libsrt_options[] = {
-    { "timeout",        "Timeout of socket I/O operations (in microseconds)",                   OFFSET(rw_timeout),       AV_OPT_TYPE_INT64, { .i64 = -1 }, -1, INT64_MAX, .flags = D|E },
+    { "timeout",        "Timeout of socket I/O operations (in microseconds)",                   OFFSET(rw_timeout),       AV_OPT_TYPE_INT64, { .i64 = -1 }, -1, 100000, .flags = D|E },
     { "onfail",         "The reaction type for a tramsmission fail",                            OFFSET(onfail),           AV_OPT_TYPE_INT,      { .i64 = SRT_OF_INVALID }, SRT_OF_ABORT, SRT_OF_INVALID, .flags = D|E, "onfail" },
     { "abort",           NULL, 0, AV_OPT_TYPE_CONST,  { .i64 = SRT_OF_ABORT },   INT_MIN, INT_MAX, .flags = D|E, "onfail" },
     { "connect",         NULL, 0, AV_OPT_TYPE_CONST,  { .i64 = SRT_OF_CONNECT }, INT_MIN, INT_MAX, .flags = D|E, "onfail" },
@@ -420,7 +421,7 @@ static int libsrt_set_options_pre(URLContext *h, int fd)
 }
 
 
-static int libsrt_setup(URLContext *h)
+static int libsrt_setup(URLContext *h, int reconnect)
 {
     struct addrinfo hints = { 0 }, *ai, *cur_ai;
     int port, fd;
@@ -556,7 +557,7 @@ static int libsrt_setup(URLContext *h)
     return 0;
 
  fail:
-    if (s->onfail == SRT_OF_CONNECT) {
+    if (1 == reconnect) {
         av_log(h, AV_LOG_WARNING, "Reconnecting on a connection setuping failure ...\n");
         if (fd >= 0)
             srt_close(fd);
@@ -596,25 +597,22 @@ static void * libsrt_thread(void * data)
 {
     URLContext *h = (URLContext *)data;
     SRTContext *s = (SRTContext *)h->priv_data;
-    int connected = 1;
     char car[USHRT_MAX];
     char car_for_size[2];
     int err_code = 0;
     int size = 0;
 
+    av_log(h, AV_LOG_ERROR, "%s() start.\n", __FUNCTION__);
+
     for (;;)
     {
         int len;
 
-        if (0 == connected && SRT_OF_ABORT == s->onfail) {
+        if (0 == s->connected && SRT_OF_ABORT == s->onfail) {
             break;
         }
-        if (0 == connected && SRT_OF_CONNECT == s->onfail && 0 == libsrt_setup(h)) {
-            connected = 1;
-        }
-        if (0 == connected) {
-            av_fifo_reset2(s->fifo);
-            continue;
+        if (0 == s->connected && SRT_OF_CONNECT == s->onfail && 0 == libsrt_setup(h, 0)) {
+            s->connected = 1;
         }
 
         pthread_mutex_lock(&s->mutex);
@@ -633,7 +631,7 @@ static void * libsrt_thread(void * data)
             av_fifo_read(s->fifo, car_for_size, 2);
             size = AV_RL16(car_for_size);
             av_assert0(0 <= size);
-            av_assert0(USHRT_MAX >= size);
+            av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
             av_assert0(av_fifo_can_read(s->fifo) >= size);
             av_fifo_read(s->fifo, car, size);
             pthread_mutex_unlock(&s->mutex);
@@ -653,9 +651,11 @@ static void * libsrt_thread(void * data)
             } else if (0 != err_code) {
                 av_log(h, AV_LOG_WARNING, "SRT network wait error: %d.\n", err_code);
                 if (s->fd >= 0) {
+                    srt_epoll_release(s->eid);
                     srt_close(s->fd);
+                    srt_cleanup();
                 }
-                connected = 0;
+                s->connected = 0;
                 continue;
             }
         }
@@ -669,19 +669,26 @@ static void * libsrt_thread(void * data)
                 goto end;
             }
             avail = av_fifo_can_write(s->fifo);
-            if (188+2 > avail) {
+            if (SRT_LIVE_MAX_PAYLOAD_SIZE+2 > avail) {
+                av_log(h, AV_LOG_WARNING, "Out of memory in FIFO.\n");
+                pthread_mutex_unlock(&s->mutex);
                 continue;
             }
             err_code = srt_recvmsg(s->fd, car, avail);
             if (0 > err_code) {
+                av_log(h, AV_LOG_WARNING, "srt_recvmsg() error: %d.\n", err_code);
                 err_code = libsrt_neterrno(h);
+                srt_epoll_release(s->eid);
                 srt_close(s->fd);
-                connected = 0;
-            } else {
+                srt_cleanup();
+                s->connected = 0;
+            } else if (0 < err_code) {
                 AV_WL16(car_for_size, err_code);
                 av_fifo_write(s->fifo, car_for_size, 2);
                 av_fifo_write(s->fifo, car, err_code);
                 pthread_cond_signal(&s->cond);
+            } else {
+                av_log(h, AV_LOG_WARNING, "srt_recvmsg() returned zero.\n");
             }
             pthread_mutex_unlock(&s->mutex);
             continue;
@@ -689,11 +696,16 @@ static void * libsrt_thread(void * data)
 
         err_code = srt_sendmsg(s->fd, car, size, -1, 1);
         if (0 > err_code) {
+            av_log(h, AV_LOG_WARNING, "srt_sendmsg() error: %d.\n", err_code);
             err_code = libsrt_neterrno(h);
             if (s->fd >= 0) {
+                srt_epoll_release(s->eid);
                 srt_close(s->fd);
+                srt_cleanup();
             }
-            connected = 0;
+            s->connected = 0;
+        } else if (0 == err_code) {
+            av_log(h, AV_LOG_WARNING, "srt_sendmsg() returned zero.\n");
         }
     }
 
@@ -702,6 +714,7 @@ end:
     srt_close(s->fd);
     srt_cleanup();
 
+    av_log(h, AV_LOG_ERROR, "%s() end.\n", __FUNCTION__);
     return NULL;
 }
 
@@ -890,7 +903,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         av_log(h, AV_LOG_FATAL, "I am an output and an input both!\n");
         return AVERROR_UNKNOWN;
     } else if (AVIO_FLAG_READ == (AVIO_FLAG_READ & flags) || AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
-        ret = libsrt_setup(h);
+        ret = libsrt_setup(h, (SRT_OF_CONNECT==s->onfail)?1:0);
         if (ret < 0) {
             goto err;
         }
@@ -898,7 +911,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
             s->write = 1;
         }
         if (0 != pthread_mutex_init(&s->mutex, NULL)) {
-            av_log(h, AV_LOG_FATAL, "I am nor an output neither an input!\n");
+            av_log(h, AV_LOG_FATAL, "%s(): I am nor an output neither an input!\n", __FUNCTION__);
             return AVERROR_UNKNOWN;
         }
         pthread_cond_init(&s->cond, NULL);
@@ -906,7 +919,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         pthread_create(&s->thread, NULL, libsrt_thread, h);
     } else {
         s->evac = 1;
-        av_log(h, AV_LOG_FATAL, "I am nor an output neither an input!\n");
+        av_log(h, AV_LOG_FATAL, "%s(): I am nor an output neither an input!\n", __FUNCTION__);
         return AVERROR_UNKNOWN;
     }
     return 0;
@@ -929,7 +942,7 @@ static int libsrt_read(URLContext *h, uint8_t *buf, int size)
     av_assert0(0 <= size);
 
     if (1 == s->write) {
-        av_log(h, AV_LOG_FATAL, "I am an output, not input!\n");
+        av_log(h, AV_LOG_FATAL, "%s(): I am an output, not input!\n", __FUNCTION__);
     }
 
     pthread_mutex_lock(&s->mutex);
@@ -938,19 +951,20 @@ static int libsrt_read(URLContext *h, uint8_t *buf, int size)
         if (av_fifo_can_read(s->fifo) >= 2) {
             av_fifo_peek(s->fifo, car_of_size, 2, 0);
             len = AV_RL16(car_of_size);
-            av_assert0(0 <= len);
+            av_assert0(0 < len);
             av_assert0(USHRT_MAX >= len);
             av_assert0(len + 2 <= av_fifo_can_read(s->fifo));
             av_fifo_drain2(s->fifo, 2);//skip the length.
             av_fifo_read(s->fifo, buf, min(len, size));
             if (size < len) {
-                av_log(h, AV_LOG_WARNING, "A part of datagram lost because of limited buffer size.\n");
+                av_log(h, AV_LOG_WARNING, "%s(): A part of datagram lost because of limited buffer size.\n", __FUNCTION__);
                 av_fifo_drain2(s->fifo, len-size);//Skip the rest
             }
             pthread_mutex_unlock(&s->mutex);
             return min(len, size);
-        } else if (1 == unloop || (h->flags & AVIO_FLAG_NONBLOCK)) {
+        } else if (0 == s->connected || 1 == unloop || (h->flags & AVIO_FLAG_NONBLOCK)) {
             pthread_mutex_unlock(&s->mutex);
+            av_log(h, AV_LOG_WARNING, "%s(): returned EAGAIN.\n", __FUNCTION__);
             return AVERROR(EAGAIN);
         } else {
             int64_t t = av_gettime() + 100000;
@@ -959,6 +973,7 @@ static int libsrt_read(URLContext *h, uint8_t *buf, int size)
             int err = pthread_cond_timedwait(&s->cond, &s->mutex, &tv);
             if (err) {
                 pthread_mutex_unlock(&s->mutex);
+                av_log(h, AV_LOG_WARNING, "%s(): returned an error %d.\n", __FUNCTION__, AVERROR(err == ETIMEDOUT ? EAGAIN : err));
                 return AVERROR(err == ETIMEDOUT ? EAGAIN : err);
             }
             unloop = 1;
@@ -975,10 +990,10 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
     char car_of_size[2];
 
     av_assert0(0 <= size);
-    av_assert0(USHRT_MAX >= size);
+    av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
 
     if (0 == s->write) {
-        av_log(h, AV_LOG_FATAL, "I am an input, not output!\n");
+        av_log(h, AV_LOG_FATAL, "%s(): I am an input, not output!\n", __FUNCTION__);
     }
 
     pthread_mutex_lock(&s->mutex);
@@ -989,8 +1004,9 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
         pthread_cond_signal(&s->cond);
         pthread_mutex_unlock(&s->mutex);
     } else {
+        pthread_cond_signal(&s->cond);
         pthread_mutex_unlock(&s->mutex);
-        av_log(h, AV_LOG_WARNING, "Out of memory in FIFO.\n");
+        av_log(h, AV_LOG_WARNING, "%s(): Out of memory in FIFO.\n", __FUNCTION__);
     }
     ret = size;
 

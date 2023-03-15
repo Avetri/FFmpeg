@@ -647,7 +647,11 @@ static void * libsrt_thread(void * data)
 
         if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
             err_code = libsrt_network_wait_fd_timeout(h, s->eid, s->write, h->rw_timeout, &h->interrupt_callback);
-            if (0 != err_code) {
+            if (AVERROR(ETIMEDOUT) == err_code) {
+                av_log(h, AV_LOG_WARNING, "SRT network wait timeout.\n");
+                continue;
+            } else if (0 != err_code) {
+                av_log(h, AV_LOG_WARNING, "SRT network wait error: %d.\n", err_code);
                 if (s->fd >= 0) {
                     srt_close(s->fd);
                 }

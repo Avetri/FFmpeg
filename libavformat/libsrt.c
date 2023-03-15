@@ -22,10 +22,15 @@
  */
 
 #include <srt/srt.h>
+#include <limits.h>
 
 #include "libavutil/opt.h"
 #include "libavutil/parseutils.h"
 #include "libavutil/time.h"
+#include "libavutil/thread.h"
+#include "libavutil/fifo.h"
+#include "libavutil/avassert.h"
+#include "libavutil/intreadwrite.h"
 
 #include "avformat.h"
 #include "internal.h"
@@ -71,8 +76,14 @@ typedef struct SRTContext {
     int eid;
     int64_t rw_timeout;
     SRTOnFail onfail;
+    int connected;
     char * uri;
     int flags;
+    AVFifo * fifo;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    pthread_t thread_tx;
+    int evac;
     int64_t listen_timeout;
     int recv_buffer_size;
     int send_buffer_size;
@@ -409,7 +420,7 @@ static int libsrt_set_options_pre(URLContext *h, int fd)
 }
 
 
-static int libsrt_setup(URLContext *h, const char *uri, int flags)
+static int libsrt_setup(URLContext *h, int reconnect)
 {
     struct addrinfo hints = { 0 }, *ai, *cur_ai;
     int port, fd;
@@ -423,14 +434,14 @@ static int libsrt_setup(URLContext *h, const char *uri, int flags)
     int eid, write_eid;
 
     av_url_split(proto, sizeof(proto), NULL, 0, hostname, sizeof(hostname),
-        &port, path, sizeof(path), uri);
+        &port, path, sizeof(path), s->uri);
     if (strcmp(proto, "srt"))
         return AVERROR(EINVAL);
     if (port <= 0 || port >= 65536) {
         av_log(h, AV_LOG_ERROR, "Port missing in uri\n");
         return AVERROR(EINVAL);
     }
-    p = strchr(uri, '?');
+    p = strchr(s->uri, '?');
     if (p) {
         if (av_find_info_tag(buf, sizeof(buf), "timeout", p)) {
             s->rw_timeout = strtoll(buf, NULL, 10);
@@ -518,7 +529,7 @@ static int libsrt_setup(URLContext *h, const char *uri, int flags)
         goto fail;
     }
 
-    if (flags & AVIO_FLAG_WRITE) {
+    if (s->flags & AVIO_FLAG_WRITE) {
         int packet_size = 0;
         int optlen = sizeof(packet_size);
         ret = libsrt_getsockopt(h, fd, SRTO_PAYLOADSIZE, "SRTO_PAYLOADSIZE", &packet_size, &optlen);
@@ -528,7 +539,7 @@ static int libsrt_setup(URLContext *h, const char *uri, int flags)
             h->max_packet_size = packet_size;
     }
 
-    ret = eid = libsrt_epoll_create(h, fd, flags & AVIO_FLAG_WRITE);
+    ret = eid = libsrt_epoll_create(h, fd, s->flags & AVIO_FLAG_WRITE);
     if (eid < 0)
         goto fail1;
 
@@ -540,7 +551,7 @@ static int libsrt_setup(URLContext *h, const char *uri, int flags)
     return 0;
 
  fail:
-    if (s->onfail == SRT_OF_CONNECT) {
+    if (1 == reconnect) {
         av_log(h, AV_LOG_WARNING, "Reconnecting on a connection setuping failure ...\n");
         if (fd >= 0)
             srt_close(fd);
@@ -560,6 +571,90 @@ static int libsrt_setup(URLContext *h, const char *uri, int flags)
         srt_close(fd);
     freeaddrinfo(ai);
     return ret;
+}
+
+static void * libsrt_thread_tx(void * data)
+{
+    URLContext *h = (URLContext *)data;
+    SRTContext *s = (SRTContext *)h->priv_data;
+    char car[USHRT_MAX];
+    char car_for_size[2];
+    int err_code = 0;
+    int size = 0;
+
+    av_log(h, AV_LOG_ERROR, "%s() start.\n", __FUNCTION__);
+
+    for (;;)
+    {
+        int len;
+
+        if (0 == s->connected && SRT_OF_ABORT == s->onfail) {
+            break;
+        }
+        if (0 == s->connected && SRT_OF_CONNECT == s->onfail && 0 == libsrt_setup(h, 0)) {
+            s->connected = 1;
+        }
+
+        pthread_mutex_lock(&s->mutex);
+        if (0 == s->connected && 0 == s->evac) {
+            pthread_mutex_unlock(&s->mutex);
+            continue;
+        }
+        if (1 == s->evac) {
+            pthread_mutex_unlock(&s->mutex);
+            goto end;
+        }
+
+        while (2 > (len = av_fifo_can_read(s->fifo))) {
+            pthread_cond_wait(&s->cond, &s->mutex);
+            if (1 == s->evac) {
+                pthread_mutex_unlock(&s->mutex);
+                goto end;
+            }
+            len = av_fifo_can_read(s->fifo);
+        }
+
+        av_fifo_read(s->fifo, car_for_size, 2);
+        size = AV_RL16(car_for_size);
+        av_assert0(0 <= size);
+        av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
+        av_assert0(av_fifo_can_read(s->fifo) >= size);
+        av_fifo_read(s->fifo, car, size);
+        pthread_mutex_unlock(&s->mutex);
+
+        if (0 >= size) {
+            continue;
+        }
+
+        if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
+            err_code = libsrt_network_wait_fd_timeout(h, s->eid, 1, h->rw_timeout, &h->interrupt_callback);
+            if (AVERROR(ETIMEDOUT) == err_code) {
+                av_log(h, AV_LOG_WARNING, "SRT network wait timeout.\n");
+                continue;
+            } else if (0 != err_code) {
+                av_log(h, AV_LOG_WARNING, "SRT network wait error: %d.\n", err_code);
+                s->connected = 0;
+                continue;
+            }
+        }
+
+        err_code = srt_sendmsg(s->fd, car, size, -1, 1);
+        if (0 > err_code) {
+            av_log(h, AV_LOG_WARNING, "srt_sendmsg() error: %d.\n", err_code);
+            err_code = libsrt_neterrno(h);
+            s->connected = 0;
+        } else if (0 == err_code) {
+            av_log(h, AV_LOG_WARNING, "srt_sendmsg() returned zero.\n");
+        }
+    }
+
+end:
+    srt_epoll_release(s->eid);
+    srt_close(s->fd);
+    srt_cleanup();
+
+    av_log(h, AV_LOG_ERROR, "%s() end.\n", __FUNCTION__);
+    return NULL;
 }
 
 static int libsrt_open(URLContext *h, const char *uri, int flags)
@@ -740,9 +835,29 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
     if (SRT_LL_INVALID != s->loglevel) {
         srt_setloglevel(s->loglevel);
     }
-    ret = libsrt_setup(h, uri, flags);
+    ret = libsrt_setup(h, (SRT_OF_CONNECT == s->onfail)?1:0);
     if (ret < 0)
         goto err;
+
+    s->connected = 1;
+    if (AVIO_FLAG_READ == (AVIO_FLAG_READ & flags) && AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
+        s->evac = 1;
+        av_log(h, AV_LOG_FATAL, "I am an output and an input both!\n");
+        return AVERROR_UNKNOWN;
+    } else if (AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
+        if (0 != pthread_mutex_init(&s->mutex, NULL)) {
+            av_log(h, AV_LOG_FATAL, "%s(): I am nor an output neither an input!\n", __FUNCTION__);
+            return AVERROR_UNKNOWN;
+        }
+        pthread_cond_init(&s->cond, NULL);
+        s->fifo = av_fifo_alloc2(188*7*128, 1, 0);
+        pthread_create(&s->thread_tx, NULL, libsrt_thread_tx, h);
+    } else if (AVIO_FLAG_READ != (AVIO_FLAG_READ & flags)) {
+        s->evac = 1;
+        av_log(h, AV_LOG_FATAL, "%s(): I am nor an output neither an input!\n", __FUNCTION__);
+        return AVERROR_UNKNOWN;
+    }
+
     return 0;
 
 err:
@@ -772,9 +887,11 @@ reread:
 
     return ret;
 fail_read:
-    if (s->onfail == SRT_OF_CONNECT && 0 == libsrt_setup(h, s->uri, s->flags)) {
+    if (AVERROR(EAGAIN) != ret && s->onfail == SRT_OF_CONNECT) {
         av_log(h, AV_LOG_WARNING, "Reconnecting on a reading failure ...\n");
-        goto reread;
+        if (0 == libsrt_setup(h, 1)) {
+            goto reread;
+        }
     }
     return ret;
 }
@@ -783,27 +900,28 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
 {
     SRTContext *s = h->priv_data;
     int ret;
+    char car_of_size[2];
 
-rewrite:
-    if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
-        ret = libsrt_network_wait_fd_timeout(h, s->eid, 1, h->rw_timeout, &h->interrupt_callback);
-        if (ret)
-            goto fail_write;
+    av_assert0(0 <= size);
+    av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
+
+    if (AVIO_FLAG_WRITE != (AVIO_FLAG_WRITE&s->flags)) {
+        av_log(h, AV_LOG_FATAL, "%s(): I am an input, not output!\n", __FUNCTION__);
     }
 
-    ret = srt_sendmsg(s->fd, buf, size, -1, 1);
-    if (ret < 0) {
-        ret = libsrt_neterrno(h);
-        goto fail_write;
+    pthread_mutex_lock(&s->mutex);
+    if (av_fifo_can_write(s->fifo) >= size+2) {
+        AV_WL16(car_of_size, size);
+        av_fifo_write(s->fifo, car_of_size, 2);
+        av_fifo_write(s->fifo, buf, size);
+        pthread_cond_signal(&s->cond);
+        pthread_mutex_unlock(&s->mutex);
+    } else {
+        pthread_cond_signal(&s->cond);
+        pthread_mutex_unlock(&s->mutex);
+        av_log(h, AV_LOG_WARNING, "%s(): Out of memory in FIFO.\n", __FUNCTION__);
     }
-    return ret;
-fail_write:
-    if (s->onfail == SRT_OF_CONNECT) {
-        av_log(h, AV_LOG_WARNING, "Reconnecting on a writing failure ...\n");
-        if (0 == libsrt_setup(h, s->uri, s->flags)) {
-            goto rewrite;
-        }
-    }
+    ret = size;
     return ret;
 }
 
@@ -811,10 +929,26 @@ static int libsrt_close(URLContext *h)
 {
     SRTContext *s = h->priv_data;
 
+    av_log(h, AV_LOG_ERROR, "%s() start.\n", __FUNCTION__);
+
     srt_epoll_release(s->eid);
     srt_close(s->fd);
 
     srt_cleanup();
+
+    if (AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & s->flags)) {
+        pthread_mutex_lock(&s->mutex);
+        s->evac = 1;
+        pthread_cond_signal(&s->cond);
+        pthread_mutex_unlock(&s->mutex);
+
+        pthread_join(s->thread_tx, NULL);
+        pthread_cond_destroy(&s->cond);
+        pthread_mutex_destroy(&s->mutex);
+        av_fifo_freep2(&s->fifo);
+    }
+
+    av_log(h, AV_LOG_ERROR, "%s() end.\n", __FUNCTION__);
 
     return 0;
 }

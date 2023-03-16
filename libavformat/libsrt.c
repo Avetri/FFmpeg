@@ -552,7 +552,7 @@ static int libsrt_setup(URLContext *h, int reconnect)
 
  fail:
     if (1 == reconnect) {
-        av_log(h, AV_LOG_WARNING, "Reconnecting on a connection setuping failure ...\n");
+        av_log(h, AV_LOG_WARNING, "%s(): Reconnecting on a connection setuping failure ...\n", __FUNCTION__);
         if (fd >= 0)
             srt_close(fd);
         ret = 0;
@@ -582,7 +582,7 @@ static void * libsrt_thread_tx(void * data)
     int err_code = 0;
     int size = 0;
 
-    av_log(h, AV_LOG_ERROR, "%s() start.\n", __FUNCTION__);
+    av_log(h, AV_LOG_DEBUG, "%s() start.\n", __FUNCTION__);
 
     for (;;)
     {
@@ -629,10 +629,10 @@ static void * libsrt_thread_tx(void * data)
         if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
             err_code = libsrt_network_wait_fd_timeout(h, s->eid, 1, h->rw_timeout, &h->interrupt_callback);
             if (AVERROR(ETIMEDOUT) == err_code) {
-                av_log(h, AV_LOG_WARNING, "SRT network wait timeout.\n");
+                av_log(h, AV_LOG_WARNING, "%s(): SRT network wait timeout.\n", __FUNCTION__);
                 continue;
             } else if (0 != err_code) {
-                av_log(h, AV_LOG_WARNING, "SRT network wait error: %d.\n", err_code);
+                av_log(h, AV_LOG_WARNING, "%s(): SRT network wait error: %d.\n", __FUNCTION__, err_code);
                 s->connected = 0;
                 continue;
             }
@@ -640,11 +640,11 @@ static void * libsrt_thread_tx(void * data)
 
         err_code = srt_sendmsg(s->fd, car, size, -1, 1);
         if (0 > err_code) {
-            av_log(h, AV_LOG_WARNING, "srt_sendmsg() error: %d.\n", err_code);
+            av_log(h, AV_LOG_WARNING, "%s(): srt_sendmsg() error: %d.\n", __FUNCTION__, err_code);
             err_code = libsrt_neterrno(h);
             s->connected = 0;
         } else if (0 == err_code) {
-            av_log(h, AV_LOG_WARNING, "srt_sendmsg() returned zero.\n");
+            av_log(h, AV_LOG_WARNING, "%s(): srt_sendmsg() returned zero.\n", __FUNCTION__);
         }
     }
 
@@ -653,7 +653,7 @@ end:
     srt_close(s->fd);
     srt_cleanup();
 
-    av_log(h, AV_LOG_ERROR, "%s() end.\n", __FUNCTION__);
+    av_log(h, AV_LOG_DEBUG, "%s() end.\n", __FUNCTION__);
     return NULL;
 }
 
@@ -842,7 +842,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
     s->connected = 1;
     if (AVIO_FLAG_READ == (AVIO_FLAG_READ & flags) && AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
         s->evac = 1;
-        av_log(h, AV_LOG_FATAL, "I am an output and an input both!\n");
+        av_log(h, AV_LOG_FATAL, "%s(): I am an output and an input both!\n", __FUNCTION__);
         return AVERROR_UNKNOWN;
     } else if (AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
         if (0 != pthread_mutex_init(&s->mutex, NULL)) {
@@ -888,7 +888,7 @@ reread:
     return ret;
 fail_read:
     if (AVERROR(EAGAIN) != ret && s->onfail == SRT_OF_CONNECT) {
-        av_log(h, AV_LOG_WARNING, "Reconnecting on a reading failure ...\n");
+        av_log(h, AV_LOG_WARNING, "%s(): Reconnecting on a reading failure ...\n", __FUNCTION__);
         if (0 == libsrt_setup(h, 1)) {
             goto reread;
         }
@@ -919,7 +919,7 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
     } else {
         pthread_cond_signal(&s->cond);
         pthread_mutex_unlock(&s->mutex);
-        av_log(h, AV_LOG_WARNING, "%s(): Out of memory in FIFO.\n", __FUNCTION__);
+        av_log(h, AV_LOG_DEBUG, "%s(): Out of memory in FIFO.\n", __FUNCTION__);
     }
     ret = size;
     return ret;
@@ -929,7 +929,7 @@ static int libsrt_close(URLContext *h)
 {
     SRTContext *s = h->priv_data;
 
-    av_log(h, AV_LOG_ERROR, "%s() start.\n", __FUNCTION__);
+    av_log(h, AV_LOG_DEBUG, "%s() start.\n", __FUNCTION__);
 
     srt_epoll_release(s->eid);
     srt_close(s->fd);
@@ -948,7 +948,7 @@ static int libsrt_close(URLContext *h)
         av_fifo_freep2(&s->fifo);
     }
 
-    av_log(h, AV_LOG_ERROR, "%s() end.\n", __FUNCTION__);
+    av_log(h, AV_LOG_DEBUG, "%s() end.\n", __FUNCTION__);
 
     return 0;
 }

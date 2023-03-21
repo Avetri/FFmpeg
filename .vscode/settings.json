@@ -1,0 +1,12 @@
+{
+  "files.associations": {
+    "srt.h": "c",
+    "glib.h": "c",
+    "thread.h": "c",
+    "pthread.h": "c",
+    "stdatomic.h": "c",
+    "numeric": "c",
+    "*.tcc": "c",
+    "avio_internal.h": "c"
+  }
+}

@@ -846,7 +846,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         return AVERROR_UNKNOWN;
     } else if (AVIO_FLAG_WRITE == (AVIO_FLAG_WRITE & flags)) {
         if (0 != pthread_mutex_init(&s->mutex, NULL)) {
-            av_log(h, AV_LOG_FATAL, "%s(): I am nor an output neither an input!\n", __FUNCTION__);
+            av_log(h, AV_LOG_FATAL, "%s(): Can't init a mutex!\n", __FUNCTION__);
             return AVERROR_UNKNOWN;
         }
         pthread_cond_init(&s->cond, NULL);

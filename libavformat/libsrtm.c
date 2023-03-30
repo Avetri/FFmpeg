@@ -951,7 +951,7 @@ static void * libsrt_thread_writer(void * data)
         }
 
         if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
-            err_code = libsrt_network_wait_fd_timeout(h, s->eid, h->rw_timeout, &h->interrupt_callback);
+            err_code = libsrt_network_wait_fd_timeout(h, me->eid, h->rw_timeout, &h->interrupt_callback);
             if (AVERROR(ETIMEDOUT) == err_code) {
                 av_log(h, AV_LOG_WARNING, "%s() 0x%04X SRT network wait timeout.\n", __FUNCTION__, me->flag);
                 continue;
@@ -961,7 +961,7 @@ static void * libsrt_thread_writer(void * data)
             }
         }
 
-        err_code = srt_sendmsg(s->fd, car, size, -1, 1);
+        err_code = srt_sendmsg(me->fd, car, size, -1, 1);
         if (0 > err_code) {
             av_log(h, AV_LOG_WARNING, "%s() 0x%04X srt_sendmsg() error: %d.\n", __FUNCTION__, me->flag, err_code);
             err_code = libsrt_neterrno(h);

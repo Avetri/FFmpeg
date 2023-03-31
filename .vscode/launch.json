@@ -36,11 +36,19 @@
       "name": "Debug",
       "program": "${workspaceFolder}/ffmpeg_g",
       "args": [
-        "-rtbufsize", "1024M", "-loglevel", "info", "-f", "mpegts", "-i", "srt://127.0.0.1:5000?mode=listener&onfail=connect&timeout=100000&packetfilter=fec&transtype=live&loglevel=debug&latency=200000",
-        "-map", "0:a", "-c:a", "copy", "-f", "rtp", "-rtpflags", "send_bye", "-payload_type", "97", "rtp://127.0.0.1:5012",
-        "-map", "0:v:0", "-c:v", "copy", "-f", "rtp", "-rtpflags", "send_bye", "-payload_type", "96", "rtp://127.0.0.1:5014?pkt_size=1360",
-        "-map", "0:v:1", "-c:v", "copy", "-f", "rtp", "-rtpflags", "skip_rtcp", "-payload_type", "96", "rtp://127.0.0.1:5016?pkt_size=1360",
-        "-map", "0:v:2", "-c:v", "copy", "-f", "rtp", "-rtpflags", "skip_rtcp", "-payload_type", "96", "rtp://127.0.0.1:5018?pkt_size=1360"
+        "-re",
+        "-loglevel", "debug",
+        "-hide_banner",
+        "-f", "lavfi", "-i", "smptehdbars=rate=25:size=1280x720",
+        "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
+        "-filter_complex", "[0:v]drawtext=text=\\'PTS: %{pts \\: hms}\\, time: %{localtime_ms}\\':x=10:y=10:fontsize=24:fontcolor=yellow@0.50:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,split=3[sv1][sv2][sv3];[sv1]drawtext=text=' 720p25 0.5M':x=5:y=30:fontsize=24:fontcolor=yellow@0.50:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf[outv1];[sv2]drawtext=text=' 720p25 1.2M':x=5:y=30:fontsize=24:fontcolor=yellow@0.50:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf[outv2];[sv3]drawtext=text=' 720p25 1.9M':x=5:y=30:fontsize=24:fontcolor=yellow@0.50:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf[outv3]",
+        "-map", "1:a", "-c:a", "libopus", "-vbr:a", "0", "-packet_loss:a", "100", "-frame_duration:a", "10.0", "-apply_phase_inv:a", "0", "-application:a", "2051", "-b:a", "128k", "-fec:a", "1",
+        "-map", "[outv1]", "-b:v:0", "0.5M", "-bufsize:v:0", "1.0M", "-maxrate:v:0", "0.5M", "-minrate:v:0", "0.5M",
+        "-map", "[outv2]", "-b:v:1", "1.2M", "-bufsize:v:1", "2.4M", "-maxrate:v:1", "1.2M", "-minrate:v:1", "1.2M",
+        "-map", "[outv3]", "-b:v:2", "1.9M", "-bufsize:v:2", "3.8M", "-maxrate:v:2", "1.9M", "-minrate:v:2", "1.9M",
+        "-c:v", "libx264", "-profile:v", "baseline", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-tune", "zerolatency", "-nal-hrd", "cbr", "-g", "25",
+        "-f", "mpegts", "-muxrate", "4.0M",
+        "srtm://127.0.0.1:5000?mode=listener&onfail=connect&timeout=100000&packetfilter=fec,cols:5,rows:5,layout:staircase,arq:always&loglevel=debug&latency=200000"
       ],
       "cwd": "${workspaceFolder}"
     }

@@ -50,6 +50,8 @@
 
 #define SRT_FIFO_LENGTH 188*7*128
 
+#define SRTM_MAX_THREADS 31
+
 enum SRTLogLevel {
     SRT_LL_INVALID = -1,
     SRT_LL_DEBUG = LOG_DEBUG,
@@ -166,7 +168,7 @@ static const AVOption libsrtm_options[] = {
     { "packetfilter",   "SRT packet filter",                                                    OFFSET(packetfilter),     AV_OPT_TYPE_STRING,   { .str = NULL },              .flags = D|E },
     { "loglevel",       "libsrt logging level",                                                 OFFSET(loglevel),         AV_OPT_TYPE_INT,      { .i64 = SRT_LL_INVALID }, -1, INT_MAX, .flags = D|E, "loglevel" },
     { "drifttracer",    "Enables or disables time drift tracer (receiver)",                     OFFSET(drifttracer),      AV_OPT_TYPE_BOOL,     { .i64 = -1 }, -1, 1,         .flags = D|E },
-    { "threads",        "Number of writing threads",                                            OFFSET(threads),          AV_OPT_TYPE_INT,      { .i64 = 4 }, 1, 16,          .flags = D|E },
+    { "threads",        "Number of writing threads",                                            OFFSET(threads),          AV_OPT_TYPE_INT,      { .i64 = 4 }, 1, SRTM_MAX_THREADS, .flags = D|E },
     { NULL }
 };
 
@@ -528,7 +530,7 @@ static void * libsrt_thread_listener(void * data)
                             one->fd = ret;
                             one->alive = 1;
                             pthread_mutex_unlock(&s->mutex_listen);
-                            av_log(h, AV_LOG_WARNING, "%s() writer 0x%04X accepted the new connection.\n", __FUNCTION__, one->flag);
+                            av_log(h, AV_LOG_WARNING, "%s() writer 0x%08X accepted the new connection.\n", __FUNCTION__, one->flag);
                             break;
                         }
                     }
@@ -538,7 +540,7 @@ static void * libsrt_thread_listener(void * data)
                     for (int j = 0; j < s->threads; j++) {
                         SRTWriter * one = s->writers+j;
                         if (readfds[i] == one->fd) {
-                            av_log(h, AV_LOG_ERROR, "%s(): stop writer 0x%04X on its socket error event!\n", __FUNCTION__, one->flag);
+                            av_log(h, AV_LOG_ERROR, "%s(): stop writer 0x%08X on its socket error event!\n", __FUNCTION__, one->flag);
                             srt_close(one->fd);
                             pthread_mutex_lock(&s->mutex_listen);
                             one->fd = -1;
@@ -593,10 +595,10 @@ static void * libsrt_thread_listener(void * data)
 
                         err_code = srt_sendmsg(one->fd, car, size, -1, 1);
                         if (0 > err_code) {
-                            av_log(h, AV_LOG_WARNING, "%s() 0x%04X srt_sendmsg() error: %d.\n", __FUNCTION__, one->flag, err_code);
+                            av_log(h, AV_LOG_WARNING, "%s() 0x%08X srt_sendmsg() error: %d.\n", __FUNCTION__, one->flag, err_code);
                             err_code = libsrt_neterrno(h);
                         } else if (0 == err_code) {
-                            av_log(h, AV_LOG_WARNING, "%s() 0x%04X srt_sendmsg() returned zero.\n", __FUNCTION__, one->flag);
+                            av_log(h, AV_LOG_WARNING, "%s() 0x%08X srt_sendmsg() returned zero.\n", __FUNCTION__, one->flag);
                         }
 
                         break;
@@ -681,7 +683,7 @@ static void * libsrt_thread_buf(void * data)
                 av_fifo_write(one->fifo, car_for_size, 2);
                 av_fifo_write(one->fifo, car, size);
             } else {
-                av_log(h, AV_LOG_WARNING, "%s() 0x%04X FIFO is full!\n", __FUNCTION__, one->flag);
+                av_log(h, AV_LOG_WARNING, "%s() 0x%08X FIFO is full!\n", __FUNCTION__, one->flag);
             }
         }
         pthread_cond_signal(&s->cond_writer);
@@ -748,6 +750,10 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         }
         if (av_find_info_tag(buf, sizeof(buf), "threads", p)) {
             s->threads = strtol(buf, NULL, 10);
+            if (s->threads > SRTM_MAX_THREADS) {
+                ret = AVERROR(EINVAL);
+                goto err;
+            }
         }
         if (av_find_info_tag(buf, sizeof(buf), "drifttracer", p)) {
             s->drifttracer = strtol(buf, NULL, 10);

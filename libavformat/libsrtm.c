@@ -444,7 +444,6 @@ static int libsrt_create_listen(URLContext *h, const char * uri) {
  */
 static void * libsrt_thread_listener(void * data)
 {
-    //FIXME: 100% CPU load while it is in connected state.
     URLContext * h = data;
     SRTContext * s = h->priv_data;
     int ret;
@@ -482,6 +481,7 @@ static void * libsrt_thread_listener(void * data)
                     // ... accept on the main
                     struct sockaddr_in addr;
                     int len = sizeof(addr);
+                    unsigned int threads_active = 0;
 
                     char streamid[513];
                     int streamid_len = sizeof(streamid);
@@ -504,7 +504,12 @@ static void * libsrt_thread_listener(void * data)
                     if (!libsrt_getsockopt(h, ret, SRTO_STREAMID, "SRTO_STREAMID", streamid, &streamid_len))
                         av_log(h, AV_LOG_VERBOSE, "accept streamid [%s], length %d\n", streamid, streamid_len);
                     libsrt_set_options_post(h, ret);
-                    if (s->threads_active == (0x01u<<s->threads)-1u) {
+
+                    pthread_mutex_lock(&s->mutex_listen);
+                    threads_active = s->threads_active;
+                    pthread_mutex_unlock(&s->mutex_listen);
+
+                    if (threads_active == (0x01u<<s->threads)-1u) {
                         //Close an accepted one if there is no space.
                         av_log(h, AV_LOG_WARNING, "%s() close an accepted socket because there is no place for it.\n", __FUNCTION__);
                         srt_close(ret);
@@ -512,16 +517,18 @@ static void * libsrt_thread_listener(void * data)
                         //Find an empty writer
                         for (int j = 0; j < s->threads; j++) {
                             SRTWriter * one = s->writers+j;
-                            int modes = SRT_EPOLL_ERR | SRT_EPOLL_OUT;
-                            // int modes = SRT_EPOLL_OUT;
-                            if (0 != s->threads_active & one->flag) {
+                            int modes = SRT_EPOLL_ERR;
+                            if (0 != (threads_active & one->flag)) {
                                 continue;
                             }
                             //Fill an empty writer
-                            srt_epoll_add_usock(s->eid, ret, &modes);
+                            pthread_mutex_lock(&s->mutex_listen);
+                            srt_epoll_update_usock(s->eid, ret, &modes);
                             s->threads_active |= one->flag;
                             one->fd = ret;
                             one->alive = 1;
+                            pthread_mutex_unlock(&s->mutex_listen);
+                            av_log(h, AV_LOG_WARNING, "%s() writer 0x%04X accepted the new connection.\n", __FUNCTION__, one->flag);
                             break;
                         }
                     }
@@ -532,11 +539,13 @@ static void * libsrt_thread_listener(void * data)
                         SRTWriter * one = s->writers+j;
                         if (readfds[i] == one->fd) {
                             av_log(h, AV_LOG_ERROR, "%s(): stop writer 0x%04X on its socket error event!\n", __FUNCTION__, one->flag);
-                            srt_epoll_remove_usock(s->eid, one->fd);
                             srt_close(one->fd);
+                            pthread_mutex_lock(&s->mutex_listen);
                             one->fd = -1;
                             one->alive = 0;
+                            srt_epoll_remove_usock(s->eid, one->fd);
                             s->threads_active &= ~one->flag;
+                            pthread_mutex_unlock(&s->mutex_listen);
                         }
                     }
                 }
@@ -574,6 +583,13 @@ static void * libsrt_thread_listener(void * data)
                         av_assert0(av_fifo_can_read(one->fifo) >= size);
                         av_fifo_drain2(one->fifo, 2);
                         av_fifo_read(one->fifo, car, size);
+
+                        if (0 == av_fifo_can_read(one->fifo)) {
+                            int modes = SRT_EPOLL_ERR;
+                            pthread_mutex_lock(&s->mutex_listen);
+                            srt_epoll_update_usock(s->eid, one->fd, &modes);
+                            pthread_mutex_unlock(&s->mutex_listen);
+                        }
 
                         err_code = srt_sendmsg(one->fd, car, size, -1, 1);
                         if (0 > err_code) {
@@ -649,11 +665,17 @@ static void * libsrt_thread_buf(void * data)
         pthread_mutex_lock(&s->mutex_writer);
         for (int i = 0; i < s->threads; i++) {
             SRTWriter * one = s->writers+i;
+            int modes = SRT_EPOLL_ERR | SRT_EPOLL_OUT;
             if (0 == (threads_active & one->flag)) {
                 if (0 < av_fifo_can_write(one->fifo)) {
                     av_fifo_reset2(one->fifo);
                 }
                 continue;
+            }
+            if (0 == av_fifo_can_read(one->fifo)) {
+                pthread_mutex_lock(&s->mutex_listen);
+                srt_epoll_update_usock(s->eid, one->fd, &modes);
+                pthread_mutex_unlock(&s->mutex_listen);
             }
             if (av_fifo_can_write(one->fifo) >= size+2) {
                 av_fifo_write(one->fifo, car_for_size, 2);

@@ -48,7 +48,7 @@
 #define SRT_LIVE_MAX_PAYLOAD_SIZE 1456
 #endif
 
-#define SRT_FIFO_LENGTH 188*7*128
+#define SRT_FIFO_LENGTH (SRT_LIVE_DEFAULT_PAYLOAD_SIZE+2)*128
 
 #define SRTM_MAX_THREADS 31
 
@@ -86,6 +86,7 @@ typedef struct SRTContext {
     int evac;
     volatile unsigned int threads_active; //Flags according to writers indeces.
     unsigned int threads;
+    int thread_fifo;
     SRTWriter * writers;
     int64_t listen_timeout;
     int send_buffer_size;
@@ -169,6 +170,7 @@ static const AVOption libsrtm_options[] = {
     { "loglevel",       "libsrt logging level",                                                 OFFSET(loglevel),         AV_OPT_TYPE_INT,      { .i64 = SRT_LL_INVALID }, -1, INT_MAX, .flags = D|E, "loglevel" },
     { "drifttracer",    "Enables or disables time drift tracer (receiver)",                     OFFSET(drifttracer),      AV_OPT_TYPE_BOOL,     { .i64 = -1 }, -1, 1,         .flags = D|E },
     { "threads",        "Number of writing threads",                                            OFFSET(threads),          AV_OPT_TYPE_INT,      { .i64 = 4 }, 1, SRTM_MAX_THREADS, .flags = D|E },
+    { "thread_fifo",    "Writing thread FIFO buffer size.",                                     OFFSET(thread_fifo),      AV_OPT_TYPE_INT,      { .i64 = SRT_FIFO_LENGTH }, -1, INT_MAX, .flags = D|E },
     { NULL }
 };
 
@@ -755,6 +757,9 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
                 goto err;
             }
         }
+        if (av_find_info_tag(buf, sizeof(buf), "thread_fifo", p)) {
+            s->thread_fifo = strtol(buf, NULL, 10);
+        }
         if (av_find_info_tag(buf, sizeof(buf), "drifttracer", p)) {
             s->drifttracer = strtol(buf, NULL, 10);
         }
@@ -858,13 +863,13 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         one->ctx = h;
         one->alive = 0;
         one->fd = -1;
-        one->fifo = s->buf = av_fifo_alloc2(SRT_FIFO_LENGTH, 1, 0);
+        one->fifo = s->buf = av_fifo_alloc2(s->thread_fifo, 1, 0);
     }
     av_assert0(0==pthread_mutex_init(&s->mutex_buf, NULL));
     av_assert0(0==pthread_cond_init(&s->cond_buf, NULL));
     av_assert0(0==pthread_mutex_init(&s->mutex_writer, NULL));
     av_assert0(0==pthread_cond_init(&s->cond_writer, NULL));
-    s->buf = av_fifo_alloc2(SRT_FIFO_LENGTH, 1, 0);
+    s->buf = av_fifo_alloc2(s->thread_fifo, 1, 0);
     pthread_create(&s->thread_buf, NULL, libsrt_thread_buf, h);
 
     pthread_create(&s->thread_listener, NULL, libsrt_thread_listener, h);

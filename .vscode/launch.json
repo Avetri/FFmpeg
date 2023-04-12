@@ -19,6 +19,24 @@
   //   "-f", "mpegts", "-muxrate", "4.0M",
   //   "srt://127.0.0.1:5000?mode=caller&onfail=connect&timeout=100000&packetfilter=fec,cols:5,rows:5,layout:staircase,arq:always&transtype=live&loglevel=debug&latency=200000"
   // ]
+  // os01lv BJ Enc.Py SRT TX
+  // "args": [
+  //   "-re",
+  //   "-loglevel", "info", "-nostats", "-hide_banner", "-hwaccel", "cuvid", "-hwaccel_output_format", "cuda",
+  //   "-f", "decklink", "-queue_size", "4294967296", "-duplex_mode", "four_sub_device_half", "-video_input", "sdi", "-channels", "2", "-video_pts", "video", "-audio_pts", "audio", "-draw_bars", "false",
+  //   "-i", "88:84ce1ca1:00000000",
+  //   "-filter_complex", "[0:v]fps=25,split=2[stream_feed][arch_feed];[stream_feed]drawtext=text=\\'PTS: %{pts \\: hms}\\, time: %{localtime_ms}\\':x=10:y=10:fontsize=48:fontcolor=yellow@0.5:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,scale=w=-1:h=1080:threads=4:sws_flags=lanczos,split=6[sv0][sv1][sv2][sv3][sv4][sv5];[sv0]drawtext=text='540p25 0.5M':x=5:y=30:fontsize=24:fontcolor=yellow@0.5:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload,scale_npp=w=-1:h=540:format=nv12:interp_algo=lanczos[outv0];[sv1]drawtext=text='540p25 1.2M':x=5:y=30:fontsize=24:fontcolor=yellow@0.5:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload,scale_npp=w=-1:h=540:format=nv12:interp_algo=lanczos[outv1];[sv2]drawtext=text='720p25 1.9M':x=5:y=30:fontsize=24:fontcolor=yellow@0.5:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload,scale_npp=w=-1:h=720:format=nv12:interp_algo=lanczos[outv2];[sv3]drawtext=text='720p25 1.9M':x=5:y=30:fontsize=24:fontcolor=yellow@0.5:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload,scale_npp=w=-1:h=720:format=nv12:interp_algo=lanczos[outv3];[sv4]drawtext=text='1080p25 2.7M':x=5:y=30:fontsize=24:fontcolor=yellow@0.5:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload,scale_npp=w=-1:h=1080:format=nv12:interp_algo=lanczos[outv4];[sv5]drawtext=text='1080p25 4.1M':x=5:y=30:fontsize=24:fontcolor=yellow@0.5:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload,scale_npp=w=-1:h=1080:format=nv12:interp_algo=lanczos[outv5];[arch_feed]drawtext=text=\\'PTS: %{pts \\: hms}\\, time: %{localtime_ms}\\, host: os01lv\\, decklink: 88:84ce1ca1:00000000\\':x=10:y=10:fontsize=48:fontcolor=white@1.0:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload,scale_npp=w=-1:h=720:format=nv12:interp_algo=lanczos[archv]",
+  //   "-map", "0:a", "-c:a", "libopus", "-vbr:a", "0", "-packet_loss:a", "100", "-frame_duration:a", "10.0", "-apply_phase_inv:a", "0", "-application:a", "2051", "-b:a", "128k", "-fec:a", "1",
+  //   "-map", "[outv0]", "-b:v:0", "0.5M", "-bufsize:v:0", "1.0M", "-maxrate:v:0", "0.5M", "-minrate:v:0", "0.5M",
+  //   "-map", "[outv1]", "-b:v:1", "1.2M", "-bufsize:v:1", "2.4M", "-maxrate:v:1", "1.2M", "-minrate:v:1", "1.2M",
+  //   "-map", "[outv2]", "-b:v:2", "1.9M", "-bufsize:v:2", "3.8M", "-maxrate:v:2", "1.9M", "-minrate:v:2", "1.9M",
+  //   "-map", "[outv3]", "-b:v:3", "1.9M", "-bufsize:v:3", "3.8M", "-maxrate:v:3", "1.9M", "-minrate:v:3", "1.9M",
+  //   "-map", "[outv4]", "-b:v:4", "2.7M", "-bufsize:v:4", "5.4M", "-maxrate:v:4", "2.7M", "-minrate:v:4", "2.7M",
+  //   "-map", "[outv5]", "-b:v:5", "4.1M", "-bufsize:v:5", "8.2M", "-maxrate:v:5", "4.1M", "-minrate:v:5", "4.1M",
+  //   "-map", "[archv]", "-b:v:6", "1.9M", "-bufsize:v:6", "3.8M", "-maxrate:v:6", "1.9M", "-minrate:v:6", "1.9M",
+  //   "-bf", "0", "-flags:v", "+global_header", "-temporal-aq", "1", "-i_qfactor", "0.75", "-b_qfactor", "1.1", "-rc-lookahead", "25", "-b_adapt", "0", "-rc", "cbr", "-tune", "ll", "-preset", "p7", "-profile:v", "baseline", "-level:v", "4.0", "-zerolatency", "1", "-g", "25", "-c:v", "h264_nvenc", "-bsf:v", "dump_extra=freq=keyframe,h264_mp4toannexb",
+  //   "-f", "tee", "[select='a,v\\:0,v\\:1,v\\:2,v\\:3,v\\:4,v\\:5,v\\:6':f=null]-|[select='a,v\\:0,v\\:1,v\\:2':f=mpegts:onfail=abort]srtm://:5050?packetfilter=fec&loglevel=debug&latency=200000|[select='a,v\\:3,v\\:4,v\\:5':f=mpegts:onfail=abort]srtm://:5051?packetfilter=fec&loglevel=debug&latency=200000|[select='a,v\\:6':f=mpegts:onfail=abort]srtm://:4999?packetfilter=fec&loglevel=debug&latency=200000"
+  // ],
   // SRT TX:
   // ffmpeg_srt_rtp_resend.sh 127.0.0.1 5000 127.0.0.1 5012 5014 5016 5018 5020 5022 5024
   // "args": [

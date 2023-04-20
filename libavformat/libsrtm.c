@@ -23,12 +23,12 @@
 
 #include <srt/srt.h>
 #include <limits.h>
+#include <glib.h>
 
 #include "libavutil/opt.h"
 #include "libavutil/parseutils.h"
 #include "libavutil/time.h"
 #include "libavutil/thread.h"
-#include "libavutil/fifo.h"
 #include "libavutil/avassert.h"
 #include "libavutil/intreadwrite.h"
 
@@ -48,9 +48,22 @@
 #define SRT_LIVE_MAX_PAYLOAD_SIZE 1456
 #endif
 
-#define SRT_FIFO_LENGTH (SRT_LIVE_DEFAULT_PAYLOAD_SIZE+2)*512
+#define SRT_BUCKET_VOLUME SRT_LIVE_MAX_PAYLOAD_SIZE+2
+
+#define SRT_QUEUE_LENGTH 512
 
 #define SRTM_MAX_THREADS 31
+
+#define CMD_START         "START"
+#define CMD_STOP          "STOP"
+#define CMD_CONNECTED     "CONN"
+#define CMD_DISCONNECTED  "DISC"
+
+static void g_nonfree(gpointer m) {
+    if ((gpointer)CMD_START != m && (gpointer)CMD_STOP != m && (gpointer)CMD_CONNECTED != m && (gpointer)CMD_DISCONNECTED != m) {
+        g_free(m);
+    }
+}
 
 enum SRTLogLevel {
     SRT_LL_INVALID = -1,
@@ -62,11 +75,12 @@ enum SRTLogLevel {
 };
 
 typedef struct SRTWriter {
-  unsigned int flag;
+  unsigned int idx;
   URLContext * ctx;
-  int alive;
   SRTSOCKET fd;
-  AVFifo * fifo;
+  GAsyncQueue * q;
+  GAsyncQueue * pool;
+  GThread * thread;
 } SRTWriter;
 
 typedef struct SRTContext {
@@ -74,19 +88,15 @@ typedef struct SRTContext {
     int fd;
     int eid;
     int64_t rw_timeout;
-    AVFifo * buf;
-    pthread_mutex_t mutex_buf;
-    pthread_cond_t cond_buf;
-    pthread_mutex_t mutex_listen;
-    pthread_cond_t cond_listen;
-    pthread_mutex_t mutex_writer;
-    pthread_cond_t cond_writer;
-    pthread_t thread_listener;
-    pthread_t thread_buf;
-    int evac;
-    volatile unsigned int threads_active; //Flags according to writers indeces.
+    GMainLoop * loop;
+    pthread_t thread_loop;
+    GAsyncQueue * q;
+    GAsyncQueue * pool;
+    GThread * thread_listener;
+    GThread * thread_buf;
+    volatile int evac;
     unsigned int threads;
-    int thread_fifo;
+    int thread_queue;
     SRTWriter * writers;
     int64_t listen_timeout;
     int send_buffer_size;
@@ -170,7 +180,7 @@ static const AVOption libsrtm_options[] = {
     { "loglevel",       "libsrt logging level",                                                 OFFSET(loglevel),         AV_OPT_TYPE_INT,      { .i64 = SRT_LL_INVALID }, -1, INT_MAX, .flags = D|E, "loglevel" },
     { "drifttracer",    "Enables or disables time drift tracer (receiver)",                     OFFSET(drifttracer),      AV_OPT_TYPE_BOOL,     { .i64 = -1 }, -1, 1,         .flags = D|E },
     { "threads",        "Number of writing threads",                                            OFFSET(threads),          AV_OPT_TYPE_INT,      { .i64 = 4 }, 1, SRTM_MAX_THREADS, .flags = D|E },
-    { "thread_fifo",    "Writing thread FIFO buffer size.",                                     OFFSET(thread_fifo),      AV_OPT_TYPE_INT,      { .i64 = SRT_FIFO_LENGTH }, -1, INT_MAX, .flags = D|E },
+    { "thread_queue",   "Writing thread queue length, SRT packets number.",                     OFFSET(thread_queue),     AV_OPT_TYPE_INT,      { .i64 = SRT_QUEUE_LENGTH }, -1, INT_MAX, .flags = D|E },
     { NULL }
 };
 
@@ -451,10 +461,9 @@ static void * libsrt_thread_listener(void * data)
     URLContext * h = data;
     SRTContext * s = h->priv_data;
     int ret;
-    int writefds_len = s->threads+1;
     int readfds_len = s->threads+1;
-    SRTSOCKET * writefds = malloc(sizeof(SRTSOCKET) * (writefds_len+1));
     SRTSOCKET * readfds = malloc(sizeof(SRTSOCKET) * (readfds_len+1));
+    unsigned int threads_cnt = 0;
 
     av_log(h, AV_LOG_WARNING, "%s() start.\n", __FUNCTION__);
 
@@ -468,9 +477,8 @@ static void * libsrt_thread_listener(void * data)
         }
 
         //Listen to the epoll
-        writefds_len = s->threads+1;
         readfds_len = s->threads+1;
-        ret = srt_epoll_wait(s->eid, readfds, &readfds_len, writefds, &writefds_len, POLLING_TIME, 0, 0, 0, 0);
+        ret = srt_epoll_wait(s->eid, readfds, &readfds_len, NULL, NULL, POLLING_TIME, 0, 0, 0, 0);
         if (0 > ret) {
             if (srt_getlasterror(NULL) != SRT_ETIMEOUT) {
                 av_log(h, AV_LOG_ERROR, "%s(): srt_epoll_wait() error!\n", __FUNCTION__);
@@ -485,7 +493,6 @@ static void * libsrt_thread_listener(void * data)
                     // ... accept on the main
                     struct sockaddr_in addr;
                     int len = sizeof(addr);
-                    unsigned int threads_active = 0;
 
                     char streamid[513];
                     int streamid_len = sizeof(streamid);
@@ -509,32 +516,29 @@ static void * libsrt_thread_listener(void * data)
                         av_log(h, AV_LOG_VERBOSE, "accept streamid [%s], length %d\n", streamid, streamid_len);
                     libsrt_set_options_post(h, ret);
 
-                    pthread_mutex_lock(&s->mutex_listen);
-                    threads_active = s->threads_active;
-                    pthread_mutex_unlock(&s->mutex_listen);
-
-                    if (threads_active == (0x01u<<s->threads)-1u) {
+                    if (threads_cnt == s->threads) {
                         //Close an accepted one if there is no space.
                         av_log(h, AV_LOG_WARNING, "%s() close an accepted socket because there is no place for it.\n", __FUNCTION__);
                         srt_close(ret);
                     } else {
                         //Find an empty writer
-                        for (int j = 0; j < s->threads; j++) {
+                        int j = 0;
+                        while(j < s->threads) {
                             SRTWriter * one = s->writers+j;
                             int modes = SRT_EPOLL_ERR;
-                            if (0 != (threads_active & one->flag)) {
+                            j++;
+                            if (-1 != one->fd) {
                                 continue;
                             }
                             //Fill an empty writer
-                            pthread_mutex_lock(&s->mutex_listen);
+                            av_log(h, AV_LOG_WARNING, "%s() writer %d shell accept the new connection.\n", __FUNCTION__, one->idx);
                             srt_epoll_update_usock(s->eid, ret, &modes);
-                            s->threads_active |= one->flag;
                             one->fd = ret;
-                            one->alive = 1;
-                            pthread_mutex_unlock(&s->mutex_listen);
-                            av_log(h, AV_LOG_WARNING, "%s() writer 0x%08X accepted the new connection.\n", __FUNCTION__, one->flag);
+                            threads_cnt += 1;
+                            g_async_queue_push_front(one->q, (gpointer)CMD_CONNECTED);
                             break;
                         }
+                        av_assert0(j <= s->threads);
                     }
                     continue;
                 } else {
@@ -542,72 +546,16 @@ static void * libsrt_thread_listener(void * data)
                     for (int j = 0; j < s->threads; j++) {
                         SRTWriter * one = s->writers+j;
                         if (readfds[i] == one->fd) {
-                            av_log(h, AV_LOG_ERROR, "%s(): stop writer 0x%08X on its socket error event!\n", __FUNCTION__, one->flag);
-                            srt_close(one->fd);
-                            pthread_mutex_lock(&s->mutex_listen);
-                            one->fd = -1;
-                            one->alive = 0;
+                            av_log(h, AV_LOG_ERROR, "%s(): writer %d shell disconnect on its socket error event!\n", __FUNCTION__, one->idx);
                             srt_epoll_remove_usock(s->eid, one->fd);
-                            s->threads_active &= ~one->flag;
-                            pthread_mutex_unlock(&s->mutex_listen);
+                            srt_close(one->fd);
+                            one->fd = -1;
+                            threads_cnt -= 1;
+                            g_async_queue_push_front(one->q, (gpointer)CMD_DISCONNECTED);
                         }
                     }
                 }
             }
-        }
-        if (0 < writefds_len) {
-            //Find the main socket
-            for (int i = 0; i < writefds_len; i++) {
-                if (writefds[i] == s->fd) {
-                    av_log(h, AV_LOG_ERROR, "%s() it (main fd) mustn't be here (writefds)!\n", __FUNCTION__);
-                }
-            }
-
-            //Find client sockets and send data
-            pthread_mutex_lock(&s->mutex_writer);
-            for (int i = 0; i < writefds_len; i++) {
-                for (int j = 0; j < s->threads; j++) {
-                    char car[USHRT_MAX];
-                    char car_for_size[2];
-                    int err_code = 0;
-                    int size = 0;
-                    int avail = 0;
-                    SRTWriter * one = s->writers+j;
-                    if (writefds[i] != one->fd) {
-                        continue;
-                    }
-                    //Use a writer
-                    writefds[i] = 0;
-                    avail = av_fifo_can_read(one->fifo);
-                    if (2 <= (avail = av_fifo_can_read(one->fifo))) {
-                        av_fifo_peek(one->fifo, car_for_size, 2, 0);
-                        size = AV_RL16(car_for_size);
-                        av_assert0(0 <= size);
-                        av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
-                        av_assert0(av_fifo_can_read(one->fifo) >= size);
-                        av_fifo_drain2(one->fifo, 2);
-                        av_fifo_read(one->fifo, car, size);
-
-                        if (0 == av_fifo_can_read(one->fifo)) {
-                            int modes = SRT_EPOLL_ERR;
-                            pthread_mutex_lock(&s->mutex_listen);
-                            srt_epoll_update_usock(s->eid, one->fd, &modes);
-                            pthread_mutex_unlock(&s->mutex_listen);
-                        }
-
-                        err_code = srt_sendmsg(one->fd, car, size, -1, 1);
-                        if (0 > err_code) {
-                            av_log(h, AV_LOG_WARNING, "%s() 0x%08X srt_sendmsg() error: %d.\n", __FUNCTION__, one->flag, err_code);
-                            err_code = libsrt_neterrno(h);
-                        } else if (0 == err_code) {
-                            av_log(h, AV_LOG_WARNING, "%s() 0x%08X srt_sendmsg() returned zero.\n", __FUNCTION__, one->flag);
-                        }
-
-                        break;
-                    }
-                }
-            }
-            pthread_mutex_unlock(&s->mutex_writer);
         }
     }
 
@@ -615,6 +563,88 @@ static void * libsrt_thread_listener(void * data)
     srt_close(s->fd);
 
     av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
+
+    return NULL;
+}
+
+/**
+ * @brief A thread function just for GLib Main Loop.
+ *
+ * @param data URLContext pointer
+ * @return NULL
+ */
+static void * libsrt_thread_loop(void * data)
+{
+    URLContext * h = data;
+    SRTContext * s = h->priv_data;
+    s->loop = g_main_loop_new(NULL, TRUE);
+    g_main_loop_run(s->loop);
+    g_main_loop_unref(s->loop);
+
+    return NULL;
+}
+
+/**
+ * @brief A thread function just for GLib Main Loop.
+ *
+ * @param data SRTWriter pointer
+ * @return NULL
+ */
+static void * libsrt_thread_writer(void * data)
+{
+    SRTWriter * me = data;
+    URLContext * h = me->ctx;
+    gboolean alive = TRUE;
+    gboolean conn  = FALSE;
+    gchar * bucket = NULL;
+    int size       = 0;
+
+    av_log(h, AV_LOG_WARNING, "%s() start writer %d.\n", __FUNCTION__, me->idx);
+
+    while (alive) {
+        if (0 == size) {
+            bucket = g_async_queue_timeout_pop(me->q, 1000);
+            if (NULL == bucket) {
+                continue;
+            }
+
+            if (0 == memcmp(CMD_STOP, bucket, sizeof CMD_STOP)) {
+                av_log(h, AV_LOG_WARNING, "%s() writer %d got \"%s\" command.\n", __FUNCTION__, me->idx, bucket);
+                alive = FALSE;
+                continue;
+            }
+            if (0 == memcmp(CMD_CONNECTED, bucket, sizeof CMD_CONNECTED)) {
+                av_log(h, AV_LOG_WARNING, "%s() writer %d got \"%s\" command.\n", __FUNCTION__, me->idx, bucket);
+                conn = TRUE;
+                continue;
+            }
+            if (0 == memcmp(CMD_DISCONNECTED, bucket, sizeof CMD_DISCONNECTED)) {
+                av_log(h, AV_LOG_WARNING, "%s() writer %d got \"%s\" command.\n", __FUNCTION__, me->idx, bucket);
+                conn = FALSE;
+                continue;
+            }
+
+            size = AV_RL16(bucket);
+            av_assert0(0 < size);
+            av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
+        }
+
+        if (!conn) {
+            memset(bucket, 0, size+2);
+            g_async_queue_push(me->pool, bucket);
+            size = 0;
+            continue;
+        }
+
+        //TODO: Check if we are really ready to send.
+        srt_send(me->fd, bucket+2, size);
+
+        memset(bucket, 0, size+2);
+        g_async_queue_push(me->pool, bucket);
+        size = 0;
+    }
+
+    av_log(h, AV_LOG_WARNING, "%s() end writer %d.\n", __FUNCTION__, me->idx);
 
     return NULL;
 }
@@ -629,72 +659,53 @@ static void * libsrt_thread_buf(void * data)
 {
     URLContext * h = data;
     SRTContext * s = h->priv_data;
-    char car[USHRT_MAX];
-    char car_for_size[2];
-    /* int err_code = 0; */
     int size = 0;
-    int avail = 0;
+    gboolean alive = TRUE;
+    gchar * bucket = NULL;
 
     av_log(h, AV_LOG_WARNING, "%s() start.\n", __FUNCTION__);
 
-    for (;;) {
-        unsigned int threads_active = 0;
+    while (alive) {
 
         if (0 == size) {
-            pthread_mutex_lock(&s->mutex_buf);
-
-            while (2 > (avail = av_fifo_can_read(s->buf))) {
-                pthread_cond_wait(&s->cond_buf, &s->mutex_buf);
-                if (1 == s->evac) {
-                    pthread_mutex_unlock(&s->mutex_buf);
-                    goto end_buf;
-                }
-                avail = av_fifo_can_read(s->buf);
-            }
-
-            av_fifo_read(s->buf, car_for_size, 2);
-            size = AV_RL16(car_for_size);
-            av_assert0(0 <= size);
-            av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
-            av_assert0(av_fifo_can_read(s->buf) >= size);
-            av_fifo_read(s->buf, car, size);
-
-            pthread_mutex_unlock(&s->mutex_buf);
-        }
-
-        pthread_mutex_lock(&s->mutex_listen);
-        threads_active = s->threads_active;
-        pthread_mutex_unlock(&s->mutex_listen);
-
-        pthread_mutex_lock(&s->mutex_writer);
-        for (int i = 0; i < s->threads; i++) {
-            SRTWriter * one = s->writers+i;
-            int modes = SRT_EPOLL_ERR | SRT_EPOLL_OUT;
-            if (0 == (threads_active & one->flag)) {
-                if (0 < av_fifo_can_write(one->fifo)) {
-                    av_fifo_reset2(one->fifo);
-                }
+            bucket = g_async_queue_timeout_pop(s->q, 1000);
+            if (NULL == bucket) {
                 continue;
             }
-            if (0 == av_fifo_can_read(one->fifo)) {
-                pthread_mutex_lock(&s->mutex_listen);
-                srt_epoll_update_usock(s->eid, one->fd, &modes);
-                pthread_mutex_unlock(&s->mutex_listen);
-            }
-            if (av_fifo_can_write(one->fifo) >= size+2) {
-                av_fifo_write(one->fifo, car_for_size, 2);
-                av_fifo_write(one->fifo, car, size);
-            } else {
-                av_log(h, AV_LOG_WARNING, "%s() 0x%08X FIFO is full!\n", __FUNCTION__, one->flag);
-            }
-        }
-        pthread_cond_signal(&s->cond_writer);
-        pthread_mutex_unlock(&s->mutex_writer);
 
+            //Check if we are going to go out.
+            if (0 == memcmp(CMD_STOP, bucket, sizeof CMD_STOP)) {
+                for (int k=0; k<s->threads; k++) {
+                    g_async_queue_push_front((s->writers+k)->q, (gpointer)CMD_STOP);
+                }
+                for (int k=0; k<s->threads; k++) {
+                    g_thread_join((s->writers+k)->thread);
+                }
+
+                alive = FALSE;
+                continue;
+            }
+
+            size = AV_RL16(bucket);
+            av_assert0(0 < size);
+            av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
+        }
+
+        for (int k=0; k<s->threads; k++) {
+            SRTWriter * one = s->writers+k;
+            gchar * sink = g_async_queue_try_pop(one->pool);
+            if (NULL == sink) {
+                av_log(h, AV_LOG_WARNING, "%s() %d writer's pool is empty!\n", __FUNCTION__, one->idx);
+                continue;
+            }
+            memcpy(sink, bucket, size+2);
+            g_async_queue_push(one->q, sink);
+        }
+
+        memset(bucket, 0, size+2);
+        g_async_queue_push(s->pool, bucket);
         size = 0;
     }
-
-end_buf:
 
     av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
 
@@ -757,8 +768,8 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
                 goto err;
             }
         }
-        if (av_find_info_tag(buf, sizeof(buf), "thread_fifo", p)) {
-            s->thread_fifo = strtol(buf, NULL, 10);
+        if (av_find_info_tag(buf, sizeof(buf), "thread_queue", p)) {
+            s->thread_queue = strtol(buf, NULL, 10);
         }
         if (av_find_info_tag(buf, sizeof(buf), "drifttracer", p)) {
             s->drifttracer = strtol(buf, NULL, 10);
@@ -852,6 +863,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
     if (SRT_LL_INVALID != s->loglevel) {
         srt_setloglevel(s->loglevel);
     }
+    pthread_create(&s->thread_loop, NULL, libsrt_thread_loop, h);
     ret = libsrt_create_listen(h, uri);
     if (ret < 0)
       goto err;
@@ -859,20 +871,26 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
     s->writers = malloc(s->threads * sizeof(SRTWriter));
     for (int i=0; i<s->threads; i++) {
         SRTWriter * one = s->writers+i;
-        one->flag = 0x01u<<i;
         one->ctx = h;
-        one->alive = 0;
+        one->idx = i;
         one->fd = -1;
-        one->fifo = s->buf = av_fifo_alloc2(s->thread_fifo, 1, 0);
+        one->q    = g_async_queue_new_full(g_nonfree);
+        one->pool = g_async_queue_new_full(g_nonfree);
+        for (int k=0; k<SRT_QUEUE_LENGTH; k++) {
+            gpointer bucket = g_malloc0(SRT_BUCKET_VOLUME);
+            g_async_queue_push(one->pool, bucket);
+        }
+        one->thread = g_thread_new("Writer thread", libsrt_thread_writer, one);
     }
-    av_assert0(0==pthread_mutex_init(&s->mutex_buf, NULL));
-    av_assert0(0==pthread_cond_init(&s->cond_buf, NULL));
-    av_assert0(0==pthread_mutex_init(&s->mutex_writer, NULL));
-    av_assert0(0==pthread_cond_init(&s->cond_writer, NULL));
-    s->buf = av_fifo_alloc2(s->thread_fifo, 1, 0);
-    pthread_create(&s->thread_buf, NULL, libsrt_thread_buf, h);
 
-    pthread_create(&s->thread_listener, NULL, libsrt_thread_listener, h);
+    s->q    = g_async_queue_new_full(g_nonfree);
+    s->pool = g_async_queue_new_full(g_nonfree);
+    for (int k=0; k<SRT_QUEUE_LENGTH; k++) {
+        gpointer bucket = g_malloc0(SRT_BUCKET_VOLUME);
+        g_async_queue_push(s->pool, bucket);
+    }
+    s->thread_buf      = g_thread_new("Main buffer thread", libsrt_thread_buf, h);
+    s->thread_listener = g_thread_new("Listener thread", libsrt_thread_listener, h);
 
     h->is_streamed = 1;
 
@@ -894,22 +912,18 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
 {
     SRTContext *s = h->priv_data;
     int ret;
-    char car_of_size[2];
+    gpointer bucket;
 
     av_assert0(0 <= size);
     av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
 
-    pthread_mutex_lock(&s->mutex_buf);
-    if (av_fifo_can_write(s->buf) >= size+2) {
-        AV_WL16(car_of_size, size);
-        av_fifo_write(s->buf, car_of_size, 2);
-        av_fifo_write(s->buf, buf, size);
-        pthread_cond_signal(&s->cond_buf);
-        pthread_mutex_unlock(&s->mutex_buf);
+    bucket = g_async_queue_try_pop(s->pool);
+    if (NULL != bucket) {
+        AV_WL16(bucket, size);
+        memcpy(((gchar *)bucket)+2, buf, size);
+        g_async_queue_push(s->q, bucket);
     } else {
-        pthread_cond_signal(&s->cond_buf);
-        pthread_mutex_unlock(&s->mutex_buf);
-        av_log(h, AV_LOG_WARNING, "%s(): Out of memory in FIFO.\n", __FUNCTION__);
+        av_log(h, AV_LOG_WARNING, "%s(): Pool is empty!\n", __FUNCTION__);
     }
     ret = size;
     return ret;
@@ -922,28 +936,22 @@ static int libsrt_close(URLContext *h)
     av_log(h, AV_LOG_WARNING, "%s() start.\n", __FUNCTION__);
 
     // Finish buffering.
-    pthread_mutex_lock(&s->mutex_buf);
     s->evac = 1;
-    pthread_cond_signal(&s->cond_buf);
-    pthread_mutex_unlock(&s->mutex_buf);
 
-    pthread_join(s->thread_buf, NULL);
-    pthread_cond_destroy(&s->cond_buf);
-    pthread_mutex_destroy(&s->mutex_buf);
-    av_fifo_freep2(&s->buf);
+    g_async_queue_push_front(s->q, (gpointer)CMD_STOP);
+    g_thread_join(s->thread_buf);
+    g_async_queue_unref(s->q);
+    g_async_queue_unref(s->pool);
 
     // Finish listening.
-    pthread_mutex_lock(&s->mutex_listen);
-    pthread_cond_signal(&s->cond_listen);
-    pthread_mutex_unlock(&s->mutex_listen);
-
-    pthread_join(s->thread_listener, NULL);
-    pthread_cond_destroy(&s->cond_listen);
-    pthread_mutex_destroy(&s->mutex_listen);
+    g_thread_join(s->thread_listener);
 
     srt_epoll_release(s->eid);
     srt_close(s->fd);
     srt_cleanup();
+
+    g_main_loop_quit(s->loop);
+    pthread_join(s->thread_loop, NULL);
 
     av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
 

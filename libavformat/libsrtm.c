@@ -59,8 +59,12 @@
 #define CMD_CONNECTED     "CONN"
 #define CMD_DISCONNECTED  "DISC"
 
+static gboolean is_cmd(gpointer m) {
+    return (gpointer)CMD_START == m || (gpointer)CMD_STOP == m || (gpointer)CMD_CONNECTED == m || (gpointer)CMD_DISCONNECTED == m;
+}
+
 static void g_nonfree(gpointer m) {
-    if ((gpointer)CMD_START != m && (gpointer)CMD_STOP != m && (gpointer)CMD_CONNECTED != m && (gpointer)CMD_DISCONNECTED != m) {
+    if (!is_cmd(m)) {
         g_free(m);
     }
 }
@@ -614,7 +618,24 @@ static void * libsrt_thread_writer(void * data)
                 continue;
             }
             if (0 == memcmp(CMD_CONNECTED, bucket, sizeof CMD_CONNECTED)) {
+                int cnt = 0;
                 av_log(h, AV_LOG_WARNING, "%s() writer %d got \"%s\" command.\n", __FUNCTION__, me->idx, bucket);
+                //Clean up all the queue.
+                g_async_queue_lock(me->q);
+                while (NULL != (bucket = g_async_queue_try_pop_unlocked(me->q))) {
+                    int size;
+                    cnt++;
+                    if (is_cmd(bucket)) {
+                        continue;
+                    }
+                    size = AV_RL16(bucket);
+                    av_assert0(0 < size);
+                    av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
+                    memset(bucket, 0, size+2);
+                    g_async_queue_push_unlocked(me->pool, bucket);
+                }
+                g_async_queue_unlock(me->q);
+                av_log(h, AV_LOG_FATAL, "%s() writer %d freed %d packets after being connected.\n", __FUNCTION__, me->idx, cnt);
                 conn = TRUE;
                 continue;
             }

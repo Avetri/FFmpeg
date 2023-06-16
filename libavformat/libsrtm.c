@@ -525,7 +525,7 @@ static void * libsrt_thread_listener(void * data)
                         int j = 0;
                         while(j < s->threads) {
                             SRTWriter * one = s->writers+j;
-                            int modes = SRT_EPOLL_ERR;
+                            int modes = SRT_EPOLL_ERR | SRT_EPOLL_OUT;
                             j++;
                             if (-1 != one->fd) {
                                 continue;
@@ -636,7 +636,15 @@ static void * libsrt_thread_writer(void * data)
             continue;
         }
 
-        //TODO: Check if we are really ready to send.
+        {
+            int len = 1;
+            SRTSOCKET write[1];
+            SRTContext * srt_ctx = (SRTContext *)h->priv_data;
+            if (1 > srt_epoll_wait(srt_ctx->eid, NULL, NULL, write, &len, 1, 0, 0, 0, 0))
+            {
+                continue;
+            }
+        }
         srt_send(me->fd, bucket+2, size);
 
         memset(bucket, 0, size+2);

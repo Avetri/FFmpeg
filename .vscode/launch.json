@@ -46,6 +46,24 @@
   //   "-map", "0:v:1", "-c:v", "copy", "-f", "rtp", "-rtpflags", "skip_rtcp", "-payload_type", "96", "rtp://127.0.0.1:5016?pkt_size=1360",
   //   "-map", "0:v:2", "-c:v", "copy", "-f", "rtp", "-rtpflags", "skip_rtcp", "-payload_type", "96", "rtp://127.0.0.1:5018?pkt_size=1360"
   // ],
+  // os01lv Third Enc.Py 0.1.11 SRT TX
+  // /home/ux/work/live/scripts/enc.py -d 88:84ce1ca3:00000000 --mobile_port 5070 --desktop_port -1 --archive_port 5069 --ff-loglevel info --srtm-loglevel debug --format 4k25 --tone --srtm-threads 8 --stream-overlay --font-stream-color MediumSpringGreen --font-stream-transp 1.0
+  // "args": [
+  //   "-re",
+  //   "-loglevel", "info", "-nostats", "-hide_banner", "-hwaccel", "cuvid", "-hwaccel_output_format", "cuda",
+  //   "-f", "decklink", "-queue_size", "4294967296", "-duplex_mode", "four_sub_device_half", "-video_input", "sdi", "-channels", "2", "-video_pts", "video", "-audio_pts", "audio", "-draw_bars", "true", "-format_code", "4k25",
+  //   "-i", "88:84ce1ca3:00000000",
+  //   "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
+  //   "-filter_complex", "[0:v]fps=25.0,scale=w=-1:h=1080:threads=4:sws_flags=lanczos,split=2[stream_feed][arch_feed];[stream_feed]drawtext=text=\\'PTS: %{pts \\: hms}\\, time: %{localtime_ms}\\':x=5.0:y=5.0:fontsize=24.0:fontcolor=MediumSpringGreen@1.0:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,split=3[sv0][sv1][sv2];[sv0]drawtext=text='540p25.0 0.5M':x=5.0:y=30.0:fontsize=24.0:fontcolor=MediumSpringGreen@1.0:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload_cuda=device=0,scale_npp=w=-1:h=540:format=nv12:interp_algo=lanczos[outv0];[sv1]drawtext=text='720p25.0 1.2M':x=5.0:y=30.0:fontsize=24.0:fontcolor=MediumSpringGreen@1.0:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload_cuda=device=0,scale_npp=w=-1:h=720:format=nv12:interp_algo=lanczos[outv1];[sv2]drawtext=text='1080p25.0 1.9M':x=5.0:y=30.0:fontsize=24.0:fontcolor=MediumSpringGreen@1.0:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload_cuda=device=0,scale_npp=w=-1:h=1080:format=nv12:interp_algo=lanczos[outv2];[arch_feed]drawtext=text=\\'PTS: %{pts \\: hms}\\, time: %{localtime_ms}\\, host: os01lv\\, decklink: 88:84ce1ca3:00000000\\, cuda: 0\\':x=10.0:y=10.0:fontsize=24.0:fontcolor=white@1.0:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf,hwupload_cuda=device=0,scale_npp=w=-1:h=720:format=nv12:interp_algo=lanczos[archv]",
+  //   "-map", "1:a", "-c:a:0", "libopus", "-vbr:a:0", "0", "-packet_loss:a:0", "100", "-frame_duration:a:0", "10.0", "-apply_phase_inv:a:0", "0", "-application:a:0", "2051", "-b:a:0", "128k", "-fec:a:0", "1",
+  //   "-map", "1:a", "-c:a:1", "libfdk_aac", "-vbr:a:1", "0", "-b:a:1", "128k",
+  //   "-map", "[outv0]", "-b:v:0", "0.5M", "-bufsize:v:0", "1.0M", "-maxrate:v:0", "0.5M", "-minrate:v:0", "0.5M",
+  //   "-map", "[outv1]", "-b:v:1", "1.2M", "-bufsize:v:1", "2.4M", "-maxrate:v:1", "1.2M", "-minrate:v:1", "1.2M",
+  //   "-map", "[outv2]", "-b:v:2", "1.9M", "-bufsize:v:2", "3.8M", "-maxrate:v:2", "1.9M", "-minrate:v:2", "1.9M",
+  //   "-map", "[archv]", "-b:v:3", "1.9M", "-bufsize:v:3", "3.8M", "-maxrate:v:3", "1.9M", "-minrate:v:3", "1.9M",
+  //   "-bf", "0", "-flags:v", "+global_header", "-temporal-aq", "1", "-i_qfactor", "0.75", "-b_qfactor", "1.1", "-b_adapt", "0", "-rc", "cbr", "-tune", "ll", "-profile:v", "baseline", "-level:v", "4.0", "-zerolatency", "1", "-c:v", "h264_nvenc", "-bsf:v", "dump_extra=freq=keyframe,h264_mp4toannexb", "-rc-lookahead", "25", "-g", "25.0", "-preset", "p4",
+  //   "-f", "tee", "-use_fifo", "1", "[select='a\\:0,a\\:1,v\\:0,v\\:1,v\\:2,v\\:3':f=null]-|[select='a\\:0,v\\:0,v\\:1,v\\:2':f=mpegts:onfail=abort:mpegts_flags=initial_discontinuity]srtm://:5070?packetfilter=fec&loglevel=debug&latency=200000&threads=8&thread_queue=512|[select='a\\:0,v\\:3':f=mpegts:onfail=abort:mpegts_flags=initial_discontinuity]srtm://:5069?packetfilter=fec&loglevel=debug&latency=200000&threads=2&thread_queue=512"
+  // ],
   "version": "0.2.0",
   "configurations": [
     {

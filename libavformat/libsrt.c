@@ -91,6 +91,7 @@ typedef struct SRTContext {
     int64_t maxbw;
     int pbkeylen;
     char *passphrase;
+    char *passphrase_file;
 #if SRT_VERSION_VALUE >= 0x010302
     int enforced_encryption;
     int kmrefreshrate;
@@ -143,7 +144,7 @@ static const AVOption libsrt_options[] = {
     { "max_size",       NULL, 0, AV_OPT_TYPE_CONST,  { .i64 = SRT_LIVE_MAX_PAYLOAD_SIZE },     INT_MIN, INT_MAX, .flags = D|E, "payload_size" },
     { "maxbw",          "Maximum bandwidth (bytes per second) that the connection can use",     OFFSET(maxbw),            AV_OPT_TYPE_INT64,    { .i64 = -1 }, -1, INT64_MAX, .flags = D|E },
     { "pbkeylen",       "Crypto key len in bytes {16,24,32} Default: 16 (128-bit)",             OFFSET(pbkeylen),         AV_OPT_TYPE_INT,      { .i64 = -1 }, -1, 32,        .flags = D|E },
-    { "passphrase",     "Crypto PBKDF2 Passphrase size[0,10..64] 0:disable crypto",             OFFSET(passphrase),       AV_OPT_TYPE_STRING,   { .str = NULL },              .flags = D|E },
+    { "passphrase_file","File with Crypto PBKDF2 Passphrase size[0,10..64] 0:disable crypto",   OFFSET(passphrase_file),  AV_OPT_TYPE_STRING,   { .str = NULL },              .flags = D|E },
 #if SRT_VERSION_VALUE >= 0x010302
     { "enforced_encryption", "Enforces that both connection parties have the same passphrase set",                              OFFSET(enforced_encryption), AV_OPT_TYPE_BOOL,  { .i64 = -1 }, -1, 1,         .flags = D|E },
     { "kmrefreshrate",       "The number of packets to be transmitted after which the encryption key is switched to a new key", OFFSET(kmrefreshrate),       AV_OPT_TYPE_INT,   { .i64 = -1 }, -1, INT_MAX,   .flags = D|E },
@@ -681,9 +682,31 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         if (av_find_info_tag(buf, sizeof(buf), "pbkeylen", p)) {
             s->pbkeylen = strtol(buf, NULL, 10);
         }
-        if (av_find_info_tag(buf, sizeof(buf), "passphrase", p)) {
+        if (av_find_info_tag(buf, sizeof(buf), "passphrase_file", p)) {
+            int fd = -1;
+            int l = -1;
+            char pass[65];
+            av_freep(&s->passphrase_file);
             av_freep(&s->passphrase);
-            s->passphrase = av_strndup(buf, strlen(buf));
+            s->passphrase_file = av_strndup(buf, strlen(buf));
+            if (-1 == (fd = open(s->passphrase_file, 0, O_RDONLY)))
+            {
+                ret = AVERROR(errno);
+                goto err;
+            }
+            if (-1 == (l = read(fd, pass, 64)))
+            {
+                ret = AVERROR(errno);
+                goto err;
+            }
+            if (0 == l)
+            {
+                ret = AVERROR(EINVAL);
+                goto err;
+            }
+            pass[l] = 0;
+            close(fd);
+            s->passphrase = av_strndup(pass, strlen(pass));
         }
         if (av_find_info_tag(buf, sizeof(buf), "packetfilter", p)) {
             av_freep(&s->packetfilter);

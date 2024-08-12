@@ -949,6 +949,17 @@ static int func_eval_expr_int_format(void *ctx, AVBPrint *bp, const char *functi
                                         argv[1][0], positions);
 }
 
+static int func_localtime_ms(void *ctx, AVBPrint *bp, const char *function_name, unsigned argc, char **argv)
+{
+    int64_t mstoday = (av_gettime() / 1000) % (24 * 60 * 60 * 1000);
+    av_bprintf(bp, "%02d:%02d:%02d.%03d",
+                       (int)(mstoday / (60 * 60 * 1000)),
+                       (int)(mstoday / (60 * 1000)) % 60,
+                       (int)(mstoday / 1000) % 60,
+                       (int)(mstoday % 1000));
+    return 0;
+}
+
 static FFExpandTextFunction expand_text_functions[] = {
     { "e",               1, 1, func_eval_expr },
     { "eif",             2, 3, func_eval_expr_int_format },
@@ -957,6 +968,7 @@ static FFExpandTextFunction expand_text_functions[] = {
     { "frame_num",       0, 0, func_frame_num },
     { "gmtime",          0, 1, func_strftime },
     { "localtime",       0, 1, func_strftime },
+    { "localtime_ms",    0, 0, func_localtime_ms },
     { "metadata",        1, 2, func_metadata },
     { "n",               0, 0, func_frame_num },
     { "pict_type",       0, 0, func_pict_type },

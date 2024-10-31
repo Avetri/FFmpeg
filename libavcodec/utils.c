@@ -1006,6 +1006,7 @@ int ff_alloc_timecode_sei(const AVFrame *frame, AVRational rate, size_t prefix_l
     PutBitContext pb;
     uint32_t *tc;
     int m;
+    int bit_num, byte_num;
 
     if (frame)
         sd = av_frame_get_side_data(frame, AV_FRAME_DATA_S12M_TIMECODE);
@@ -1017,7 +1018,11 @@ int ff_alloc_timecode_sei(const AVFrame *frame, AVRational rate, size_t prefix_l
     tc =  (uint32_t*)sd->data;
     m  = tc[0] & 3;
 
-    *sei_size = sizeof(uint32_t) * 4;
+    bit_num = 2+(41*m)+2;
+    byte_num = (bit_num/8) + ((0<(bit_num%8))?1:0);
+    bit_num = byte_num*8;
+
+    *sei_size = byte_num;
     *data = av_mallocz(*sei_size + prefix_len);
     if (!*data)
         return AVERROR(ENOMEM);
@@ -1025,6 +1030,7 @@ int ff_alloc_timecode_sei(const AVFrame *frame, AVRational rate, size_t prefix_l
 
     init_put_bits(&pb, sei_data, *sei_size);
     put_bits(&pb, 2, m); // num_clock_ts
+    bit_num -= 2;
 
     for (int j = 1; j <= m; j++) {
         uint32_t tcsmpte = tc[j];
@@ -1056,7 +1062,11 @@ int ff_alloc_timecode_sei(const AVFrame *frame, AVRational rate, size_t prefix_l
         put_bits(&pb, 6, mm);
         put_bits(&pb, 5, hh);
         put_bits(&pb, 5, 0);
+        bit_num -= 41;
     }
+    put_bits(&pb, 1, 1);
+    bit_num -= 1;
+    put_bits(&pb, bit_num, 0);
     flush_put_bits(&pb);
 
     return 0;

@@ -228,6 +228,7 @@ OBJS-$(CONFIG_CHROMAKEY_CUDA_FILTER)         += vf_chromakey_cuda.o vf_chromakey
 OBJS-$(CONFIG_CHROMANR_FILTER)               += vf_chromanr.o
 OBJS-$(CONFIG_CHROMASHIFT_FILTER)            += vf_chromashift.o
 OBJS-$(CONFIG_CIESCOPE_FILTER)               += vf_ciescope.o
+OBJS-$(CONFIG_CLOCKS12MTC_FILTER)            += vf_clocks12mtc.o
 OBJS-$(CONFIG_CODECVIEW_FILTER)              += vf_codecview.o qp_table.o
 OBJS-$(CONFIG_COLORBALANCE_FILTER)           += vf_colorbalance.o
 OBJS-$(CONFIG_COLORCHANNELMIXER_FILTER)      += vf_colorchannelmixer.o

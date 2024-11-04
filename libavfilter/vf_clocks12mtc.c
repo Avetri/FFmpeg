@@ -17,7 +17,15 @@ typedef struct ClockS12mTcContext {
     int local_time;
     AVRational rate;
     double d_rate;
+    int64_t frame_us;
+    int64_t frame_max_us;
+    int64_t frame_min_us;
+    int64_t time_start;
+    int64_t time_last;
+    int64_t pts_start;
+    int64_t pts_last;
     int current_frame;
+    int start_frame;
     int day_frames;
 
     char tcbuf[AV_TIMECODE_STR_SIZE];
@@ -49,17 +57,15 @@ static int config_props(AVFilterLink *inlink)
 {
     AVFilterContext *ctx = inlink->dst;
     ClockS12mTcContext *s = ctx->priv;
-    int64_t mstoday;
-    double d_stoday;
 
     s->rate = inlink->frame_rate;
     av_assert0(0 != s->rate.den);
     s->d_rate = (double)s->rate.num/(double)s->rate.den;
+    s->frame_us = (1000000*s->rate.den)/s->rate.num;
+    s->frame_max_us = s->frame_us*3/2;
+    s->frame_min_us = s->frame_us*2/3;
     s->day_frames = (int)(60.0*60.0*24.0*s->d_rate);
-
-    mstoday = (av_gettime() / 1000) % (24 * 60 * 60 * 1000);
-    d_stoday = (double)(mstoday/1000) + (((double)(mstoday%1000))/1000.0);
-    s->current_frame = (int)(d_stoday*s->d_rate);
+    s->time_last = LLONG_MAX;
 
     av_log(ctx, AV_LOG_DEBUG, "frame_rate: %f replace_tc:%d local_time:%d shift_ms:%d\n",
             av_q2d(s->rate), s->replace_tc, s->local_time, s->shift_ms);
@@ -75,15 +81,37 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     AVTimecode tcr;
     int hh, mm, ss, ff;
     int err;
+    int64_t pts_cur = av_rescale_q(frame->pts, inlink->time_base, frame->time_base);
+    int64_t time_cur = av_gettime()%(1000000ll*3600ll*24ll);
+    static int cnt = 0;
+    if ((abs(pts_cur-s->pts_last) > s->frame_max_us) || (abs(pts_cur-s->pts_last) < s->frame_min_us)) {
+        s->pts_start = pts_cur;
+        s->time_start = time_cur;
+        s->current_frame = 0;
+        s->start_frame = s->current_frame;
+        av_log(ctx, AV_LOG_INFO, "Reinit start time on PTS.");
+    } else if (time_cur < s->time_last) {
+        //TODO: Arrange tail day frames
+        s->pts_start = pts_cur;
+        s->time_start = time_cur;
+        s->current_frame = 0;
+        s->start_frame = s->current_frame;
+        av_log(ctx, AV_LOG_INFO, "Reinit start time on time rotation.");
+    } else {
+        s->current_frame += 1;
+    }
+    cnt++;
+    s->pts_last = pts_cur;
+    s->time_last = time_cur;
 
-    ss = (int)trunc((double)s->current_frame*1.0)/s->d_rate;
-    ff = s->current_frame-(int)((double)ss*s->d_rate);
+    ss = s->time_start/1000000ll;
+    ff = s->current_frame;
     hh = ss/3600;
     ss = ss-(hh*3600);
     mm = ss/60;
     ss = ss-(mm*60);
 
-    err = av_timecode_init_from_components(&tcr, s->rate, 0, hh, mm, ss, ff, ctx);
+    err = av_timecode_init_from_components(&tcr, s->rate, AV_TIMECODE_FLAG_24HOURSMAX, hh, mm, ss, ff, ctx);
 
     if (0 == err) {
         char tcstr[AV_TIMECODE_STR_SIZE];
@@ -109,11 +137,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         }
     } else {
         av_log(ctx, AV_LOG_ERROR, "timecode initialization error: %d", err);
-    }
-
-    s->current_frame++;
-    if (s->current_frame >= s->day_frames) {
-        s->current_frame = 0;
     }
 
     return ff_filter_frame(outlink, frame);

@@ -127,6 +127,34 @@ char *av_timecode_make_string(const AVTimecode *tc, char *buf, int framenum_arg)
     return buf;
 }
 
+char *av_timecode_make_string_ms(const AVTimecode *tc, char *buf, int framenum_arg)
+{
+    int fps = tc->fps;
+    int drop = tc->flags & AV_TIMECODE_FLAG_DROPFRAME;
+    int hh, mm, ss, ff, neg = 0;
+    int ff_ms;
+    int64_t framenum = framenum_arg;
+
+    framenum += tc->start;
+    if (drop)
+        framenum = av_timecode_adjust_ntsc_framenum2(framenum, fps);
+    if (framenum < 0) {
+        framenum = -framenum;
+        neg = tc->flags & AV_TIMECODE_FLAG_ALLOWNEGATIVE;
+    }
+    ff = framenum % fps;
+    ss = framenum / fps        % 60;
+    mm = framenum / (fps*60LL) % 60;
+    hh = framenum / (fps*3600LL);
+    if (tc->flags & AV_TIMECODE_FLAG_24HOURSMAX)
+        hh = hh % 24;
+    ff_ms = (ff*tc->rate.den*1000)/tc->rate.num;
+    snprintf(buf, AV_TIMECODE_STR_SIZE, "%s%02d:%02d:%02d%c.%03d",
+             neg ? "-" : "",
+             hh, mm, ss, drop ? ';' : ':', ff_ms);
+    return buf;
+}
+
 static unsigned bcd2uint(uint8_t bcd)
 {
    unsigned low  = bcd & 0xf;

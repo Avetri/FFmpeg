@@ -110,6 +110,20 @@ uint32_t av_timecode_get_smpte(AVRational rate, int drop, int hh, int mm, int ss
 char *av_timecode_make_string(const AVTimecode *tc, char *buf, int framenum);
 
 /**
+ * Load timecode string in buf. Milliseconds instead of frames count.
+ *
+ * @param tc       timecode data correctly initialized
+ * @param buf      destination buffer, must be at least AV_TIMECODE_STR_SIZE long
+ * @param framenum frame number
+ * @return         the buf parameter
+ *
+ * @note Timecode representation can be a negative timecode and have more than
+ *       24 hours, but will only be honored if the flags are correctly set.
+ * @note The frame number is relative to tc->start.
+ */
+char *av_timecode_make_string_ms(const AVTimecode *tc, char *buf, int framenum);
+
+/**
  * Get the timecode string from the SMPTE timecode format.
  *
  * In contrast to av_timecode_make_smpte_tc_string this function supports 50/60

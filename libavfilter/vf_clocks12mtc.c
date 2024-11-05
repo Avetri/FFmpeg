@@ -117,7 +117,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 
     if (0 == err) {
         char tcstr[AV_TIMECODE_STR_SIZE];
+        char tcmsstr[AV_TIMECODE_STR_SIZE];
         const char *tc = av_timecode_make_string(&tcr, tcstr, 0);
+        const char *tc_ms = av_timecode_make_string_ms(&tcr, tcmsstr, 0);
         if (tc) {
             if (av_cmp_q(inlink->frame_rate, av_make_q(60, 1)) < 1) {
                 uint32_t tc_data = av_timecode_get_smpte_from_framenum(&tcr, 0);
@@ -135,6 +137,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 
             if (av_dict_set(&frame->metadata, "timecode", tc, 0) < 0) {
                 av_log(ctx, AV_LOG_ERROR, "'timecode' metadata adding error.");
+            }
+            if (av_dict_set(&frame->metadata, "timecode_ms", tc_ms, 0) < 0) {
+                av_log(ctx, AV_LOG_ERROR, "'timecode_ms' metadata adding error.");
             }
         }
     } else {

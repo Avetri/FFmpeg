@@ -36,8 +36,10 @@ typedef struct ClockS12mTcContext {
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 
 static const AVOption clocks12mtc_options[] = {
+    /*
     { "replace_tc", "", OFFSET(replace_tc), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
     { "local_time", "", OFFSET(local_time), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+    */
     { "shift_ms", "", OFFSET(shift_ms), AV_OPT_TYPE_INT, {.i64 = 0 }, -10000, 10000, FLAGS },
     { NULL }
 };
@@ -153,7 +155,7 @@ static const AVFilterPad inputs[] = {
 
 const AVFilter ff_vf_clocks12mtc = {
     .name          = "clocks12mtc",
-    .description   = NULL_IF_CONFIG_SMALL("Generate new or replace original s12m timecode. Generate strings for drawtext filter."),
+    .description   = NULL_IF_CONFIG_SMALL("Generate s12m timecode for encoder and metadata:timecode for drawtext filter."),
     .priv_size     = sizeof(ClockS12mTcContext),
     .priv_class    = &clocks12mtc_class,
     .flags         = AVFILTER_FLAG_METADATA_ONLY,

@@ -82,7 +82,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     int hh, mm, ss, ff;
     int err;
     int64_t pts_cur = av_rescale_q(frame->pts, inlink->time_base, frame->time_base);
-    int64_t time_cur = av_gettime()%(1000000ll*3600ll*24ll);
+    int64_t time_cur = (av_gettime()+(s->shift_ms*1000))%(1000000ll*3600ll*24ll);
     static int cnt = 0;
     if ((abs(pts_cur-s->pts_last) > s->frame_max_us) || (abs(pts_cur-s->pts_last) < s->frame_min_us)) {
         s->pts_start = pts_cur;

@@ -1212,6 +1212,9 @@ static av_cold int nvenc_setup_h264_config(AVCodecContext *avctx)
     }
 
     h264->outputPictureTimingSEI = 1;
+    if (ctx->s12m_tc) {
+        h264->enableTimeCode = 1;
+    }
 
 #ifndef NVENC_NO_DEPRECATED_RC
     if (cc->rcParams.rateControlMode == NV_ENC_PARAMS_RC_CBR_LOWDELAY_HQ ||
@@ -2474,7 +2477,7 @@ static int prepare_sei_data_array(AVCodecContext *avctx, const AVFrame *frame)
         }
     }
 
-    if (ctx->s12m_tc && av_frame_get_side_data(frame, AV_FRAME_DATA_S12M_TIMECODE)) {
+    if (ctx->s12m_tc && av_frame_get_side_data(frame, AV_FRAME_DATA_S12M_TIMECODE) && avctx->codec->id != AV_CODEC_ID_H264) {
         void *tc_data = NULL;
         size_t tc_size = 0;
 
@@ -2639,10 +2642,22 @@ static void reconfig_encoder(AVCodecContext *avctx, const AVFrame *frame)
     }
 }
 
+#define MIN(a,b) (((a)<(b))?(a):(b))
+
+static unsigned bcd2uint(uint8_t bcd)
+{
+    unsigned low  = bcd & 0xf;
+    unsigned high = bcd >> 4;
+    if (low > 9 || high > 9)
+        return 0;
+    return low + 10*high;
+}
+
 static int nvenc_send_frame(AVCodecContext *avctx, const AVFrame *frame)
 {
     NVENCSTATUS nv_status;
     NvencSurface *tmp_out_surf, *in_surf;
+    AVFrameSideData * sd;
     int res, res2;
     int sei_count = 0;
     int i;
@@ -2707,6 +2722,37 @@ static int nvenc_send_frame(AVCodecContext *avctx, const AVFrame *frame)
             if (res < 0)
                 return res;
             sei_count = res;
+        }
+
+        if (ctx->s12m_tc && NULL != (sd = av_frame_get_side_data(frame, AV_FRAME_DATA_S12M_TIMECODE)) && NULL != sd->data) {
+            int i, n = ((uint32_t*)sd->data)[0];
+            for (i=0; i<MIN(n,3); i++) {
+                uint32_t tc = ((uint32_t*)sd->data)[i+1];
+                NV_ENC_CLOCK_TIMESTAMP_SET * ts = &pic_params.codecPicParams.h264PicParams.timeCode.clockTimestamp[i];
+                unsigned hh   = bcd2uint(tc     & 0x3f);    // 6-bit hours
+                unsigned mm   = bcd2uint(tc>>8  & 0x7f);    // 7-bit minutes
+                unsigned ss   = bcd2uint(tc>>16 & 0x7f);    // 7-bit seconds
+                unsigned ff   = bcd2uint(tc>>24 & 0x3f);    // 6-bit frames
+                unsigned drop = tc & 1<<30 && !0;  // 1-bit drop if not arbitrary bit
+
+                /* Calculate frame number of HEVC by SMPTE ST 12-1:2014 Sec 12.2 if rate > 30FPS */
+                if (av_cmp_q(avctx->framerate, (AVRational) {30, 1}) == 1) {
+                    unsigned pc;
+                    ff *= 2;
+                    if (av_cmp_q(avctx->framerate, (AVRational) {50, 1}) == 0)
+                        pc = !!(tc & 1 << 7);
+                    else
+                        pc = !!(tc & 1 << 23);
+                    ff = (ff + pc) & 0x7f;
+                }
+
+                ts->cntDroppedFrames = drop;
+                ts->nFrames = ff;
+                ts->secondsValue = ss;
+                ts->minutesValue = mm;
+                ts->hoursValue = hh;
+                ts->timeOffset = 0;
+            }
         }
 
         res = nvenc_store_frame_data(avctx, &pic_params, frame);

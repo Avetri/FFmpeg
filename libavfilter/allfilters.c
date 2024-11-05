@@ -211,6 +211,7 @@ extern const AVFilter ff_vf_chromakey_cuda;
 extern const AVFilter ff_vf_chromanr;
 extern const AVFilter ff_vf_chromashift;
 extern const AVFilter ff_vf_ciescope;
+extern const AVFilter ff_vf_clocks12mtc;
 extern const AVFilter ff_vf_codecview;
 extern const AVFilter ff_vf_colorbalance;
 extern const AVFilter ff_vf_colorchannelmixer;

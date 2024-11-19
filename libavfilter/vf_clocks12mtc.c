@@ -22,12 +22,12 @@ typedef struct ClockS12mTcContext {
     int64_t frame_us;
     int64_t frame_max_us;
     int64_t frame_min_us;
-    int64_t time_start;
-    int64_t time_last;
+    int64_t dtime_start_s;
+    int64_t ts_start_us;
+    int64_t ts_last_us;
     int64_t pts_start;
     int64_t pts_last;
     int current_frame;
-    int start_frame;
     int day_frames;
 
     char tcbuf[AV_TIMECODE_STR_SIZE];
@@ -69,7 +69,7 @@ static int config_props(AVFilterLink *inlink)
     s->frame_max_us = s->frame_us*3/2;
     s->frame_min_us = s->frame_us*2/3;
     s->day_frames = (int)(60.0*60.0*24.0*s->d_rate);
-    s->time_last = LLONG_MAX;
+    s->ts_last_us = LLONG_MAX;
 
     av_log(ctx, AV_LOG_DEBUG, "frame_rate: %f replace_tc:%d local_time:%d shift_ms:%d\n",
             av_q2d(s->rate), s->replace_tc, s->local_time, s->shift_ms);
@@ -86,30 +86,31 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     int hh, mm, ss, ff;
     int err;
     int64_t pts_cur = av_rescale_q(frame->pts, inlink->time_base, frame->time_base);
-    int64_t ts_us = av_gettime();
-    int64_t time_cur = (ts_us+(s->shift_ms*1000))%(1000000ll*3600ll*24ll);
-    static int cnt = 0;
-    if ((abs(pts_cur-s->pts_last) > s->frame_max_us) || (abs(pts_cur-s->pts_last) < s->frame_min_us)) {
+    int64_t ts_us = av_gettime()-(s->shift_ms*1000ll);
+    time_t ts_s = (time_t)ts_us/1000000ll;
+    int32_t dtime_cur_s;
+    int64_t dtime_cur_us;
+    {
+        struct tm tm;
+        localtime_r(&ts_s, &tm);
+        dtime_cur_s = tm.tm_hour*3600 + tm.tm_min*60 + tm.tm_sec;
+        dtime_cur_us = (dtime_cur_s*1000000ll) + (ts_us%1000000ll);
+    }
+    if ((abs(pts_cur-s->pts_last) > s->frame_max_us) || (abs(pts_cur-s->pts_last) < s->frame_min_us) ||
+        (abs(ts_us-s->ts_last_us) > s->frame_max_us) || (abs(ts_us-s->ts_last_us) < s->frame_min_us) ||
+        ((ts_us-s->ts_start_us)/s->frame_us != s->current_frame+1)) {
+        s->ts_start_us = ts_us-dtime_cur_us;
         s->pts_start = pts_cur;
-        s->time_start = time_cur;
-        s->current_frame = 0;
-        s->start_frame = s->current_frame;
-        av_log(ctx, AV_LOG_INFO, "Reinit start time on PTS.\n");
-    } else if (time_cur < s->time_last) {
-        //TODO: Arrange tail day frames
-        s->pts_start = pts_cur;
-        s->time_start = time_cur;
-        s->current_frame = 0;
-        s->start_frame = s->current_frame;
-        av_log(ctx, AV_LOG_INFO, "Reinit start time on time rotation.\n");
+        s->dtime_start_s = 0;
+        s->current_frame = dtime_cur_us/s->frame_us;
+        av_log(ctx, AV_LOG_INFO, "Reinit TC due to PTS/time/FF inconsistency.\n");
     } else {
         s->current_frame += 1;
     }
-    cnt++;
     s->pts_last = pts_cur;
-    s->time_last = time_cur;
+    s->ts_last_us = ts_us;
 
-    ss = s->time_start/1000000ll;
+    ss = s->dtime_start_s;
     ff = s->current_frame;
     hh = ss/3600;
     ss = ss-(hh*3600);

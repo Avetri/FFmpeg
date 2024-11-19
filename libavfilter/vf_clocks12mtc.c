@@ -94,14 +94,14 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         s->time_start = time_cur;
         s->current_frame = 0;
         s->start_frame = s->current_frame;
-        av_log(ctx, AV_LOG_INFO, "Reinit start time on PTS.");
+        av_log(ctx, AV_LOG_INFO, "Reinit start time on PTS.\n");
     } else if (time_cur < s->time_last) {
         //TODO: Arrange tail day frames
         s->pts_start = pts_cur;
         s->time_start = time_cur;
         s->current_frame = 0;
         s->start_frame = s->current_frame;
-        av_log(ctx, AV_LOG_INFO, "Reinit start time on time rotation.");
+        av_log(ctx, AV_LOG_INFO, "Reinit start time on time rotation.\n");
     } else {
         s->current_frame += 1;
     }
@@ -146,19 +146,19 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                     ((uint32_t*)sd->data)[0] = 1;       // one TC
                     ((uint32_t*)sd->data)[1] = tc_data; // TC
                 } else {
-                    av_log(ctx, AV_LOG_ERROR, "s12m timecode side data adding error.");
+                    av_log(ctx, AV_LOG_ERROR, "s12m timecode side data adding error.\n");
                 }
             }
 
             if (av_dict_set(&frame->metadata, "timecode", tc, 0) < 0) {
-                av_log(ctx, AV_LOG_ERROR, "'timecode' metadata adding error.");
+                av_log(ctx, AV_LOG_ERROR, "'timecode' metadata adding error.\n");
             }
             if (av_dict_set(&frame->metadata, "timecode_ms", tc_ms, 0) < 0) {
-                av_log(ctx, AV_LOG_ERROR, "'timecode_ms' metadata adding error.");
+                av_log(ctx, AV_LOG_ERROR, "'timecode_ms' metadata adding error.\n");
             }
         }
     } else {
-        av_log(ctx, AV_LOG_ERROR, "timecode initialization error: %d", err);
+        av_log(ctx, AV_LOG_ERROR, "timecode initialization error: %d\n", err);
     }
 
     return ff_filter_frame(outlink, frame);

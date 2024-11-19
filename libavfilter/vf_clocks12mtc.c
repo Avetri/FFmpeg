@@ -9,6 +9,8 @@
 #include "video.h"
 #include "libavutil/rational.h"
 
+#include <time.h>
+
 typedef struct ClockS12mTcContext {
     const AVClass *class;
 
@@ -84,7 +86,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     int hh, mm, ss, ff;
     int err;
     int64_t pts_cur = av_rescale_q(frame->pts, inlink->time_base, frame->time_base);
-    int64_t time_cur = (av_gettime()+(s->shift_ms*1000))%(1000000ll*3600ll*24ll);
+    int64_t ts_us = av_gettime();
+    int64_t time_cur = (ts_us+(s->shift_ms*1000))%(1000000ll*3600ll*24ll);
     static int cnt = 0;
     if ((abs(pts_cur-s->pts_last) > s->frame_max_us) || (abs(pts_cur-s->pts_last) < s->frame_min_us)) {
         s->pts_start = pts_cur;
@@ -114,6 +117,18 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     ss = ss-(mm*60);
 
     err = av_timecode_init_from_components(&tcr, s->rate, AV_TIMECODE_FLAG_24HOURSMAX, hh, mm, ss, ff, ctx);
+
+    {
+        int64_t ts_ms = ts_us/1000;
+        time_t ts_s = ts_ms/1000;
+        struct tm tm;
+        char tsstr[24]; // YYYY.mm.dd HH:MM:SS.fff
+        localtime_r(&ts_s, &tm);
+        snprintf(tsstr, sizeof(tsstr), "%04d.%02d.%02d %02d:%02d:%02d.%03d", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts_ms%1000ll));
+        if (av_dict_set(&frame->metadata, "timestamp_ms", tsstr, 0) < 0) {
+            av_log(ctx, AV_LOG_ERROR, "'timestamp_ms' metadata adding error.\n");
+        }
+    }
 
     if (0 == err) {
         char tcstr[AV_TIMECODE_STR_SIZE];

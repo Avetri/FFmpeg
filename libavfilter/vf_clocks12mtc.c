@@ -85,6 +85,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     AVTimecode tcr;
     int hh, mm, ss, ff;
     int err;
+    int64_t pts_d, ts_us_d, ff_d;
     int64_t pts_cur = av_rescale_q(frame->pts, inlink->time_base, frame->time_base);
     int64_t ts_us = av_gettime()-(s->shift_ms*1000ll);
     time_t ts_s = (time_t)ts_us/1000000ll;
@@ -96,14 +97,17 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         dtime_cur_s = tm.tm_hour*3600 + tm.tm_min*60 + tm.tm_sec;
         dtime_cur_us = (dtime_cur_s*1000000ll) + (ts_us%1000000ll);
     }
-    if ((abs(pts_cur-s->pts_last) > s->frame_max_us) || (abs(pts_cur-s->pts_last) < s->frame_min_us) ||
-        (abs(ts_us-s->ts_last_us) > s->frame_max_us) || (abs(ts_us-s->ts_last_us) < s->frame_min_us) ||
-        ((ts_us-s->ts_start_us)/s->frame_us != s->current_frame+1)) {
+    pts_d = ((pts_cur-s->pts_last)*1000000ll)/frame->time_base.den;
+    ts_us_d = ts_us-s->ts_last_us;
+    ff_d = (ts_us-s->ts_start_us)/s->frame_us - s->current_frame;
+    if ((abs(pts_d) > s->frame_max_us) || (abs(pts_d) < s->frame_min_us) ||
+        (abs(ts_us_d) > s->frame_max_us) || (abs(ts_us_d) < s->frame_min_us) ||
+        (ff_d != 1)) {
         s->ts_start_us = ts_us-dtime_cur_us;
         s->pts_start = pts_cur;
         s->dtime_start_s = 0;
         s->current_frame = dtime_cur_us/s->frame_us;
-        av_log(ctx, AV_LOG_INFO, "Reinit TC due to PTS/time/FF inconsistency.\n");
+        av_log(ctx, AV_LOG_INFO, "Reinit TC due to PTS(%" PRId64 ")/time(%" PRId64 ")/FF(%" PRId64 ") differencies inconsistency.\n", pts_d, ts_us_d, ff_d);
     } else {
         s->current_frame += 1;
     }

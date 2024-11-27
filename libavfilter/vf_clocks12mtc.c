@@ -27,6 +27,7 @@ typedef struct ClockS12mTcContext {
     int64_t ts_last_us;
     int64_t pts_start;
     int64_t pts_last;
+    int64_t current_frame_ts_us;
     int current_frame;
     int day_frames;
 
@@ -100,16 +101,17 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     pts_d = ((pts_cur-s->pts_last)*1000000ll)/frame->time_base.den;
     ts_us_d = ts_us-s->ts_last_us;
     ff_d = (ts_us-s->ts_start_us)/s->frame_us - s->current_frame;
-    if ((abs(pts_d) > s->frame_max_us) || (abs(pts_d) < s->frame_min_us) ||
-        (abs(ts_us_d) > s->frame_max_us) || (abs(ts_us_d) < s->frame_min_us) ||
-        (ff_d != 1)) {
+    if ((pts_d > s->frame_max_us) || (pts_d <= 0) ||
+        (ts_us_d > 1000000) || (ts_us_d <= 0)) {
         s->ts_start_us = ts_us-dtime_cur_us;
         s->pts_start = pts_cur;
         s->dtime_start_s = 0;
         s->current_frame = dtime_cur_us/s->frame_us;
+        s->current_frame_ts_us = ts_us;
         av_log(ctx, AV_LOG_INFO, "Reinit TC due to PTS(%" PRId64 ")/time(%" PRId64 ")/FF(%" PRId64 ") differencies inconsistency.\n", pts_d, ts_us_d, ff_d);
     } else {
         s->current_frame += 1;
+        s->current_frame_ts_us += pts_d;
     }
     s->pts_last = pts_cur;
     s->ts_last_us = ts_us;
@@ -124,7 +126,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     err = av_timecode_init_from_components(&tcr, s->rate, AV_TIMECODE_FLAG_24HOURSMAX, hh, mm, ss, ff, ctx);
 
     {
-        int64_t ts_ms = ts_us/1000;
+        int64_t ts_ms = s->current_frame_ts_us/1000;
         time_t ts_s = ts_ms/1000;
         struct tm tm;
         char tsstr[24]; // YYYY.mm.dd HH:MM:SS.fff

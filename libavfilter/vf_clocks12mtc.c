@@ -94,7 +94,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     int64_t dtime_cur_us;
     {
         struct tm tm;
-        localtime_r(&ts_s, &tm);
+        gmtime_r(&ts_s, &tm);
         dtime_cur_s = tm.tm_hour*3600 + tm.tm_min*60 + tm.tm_sec;
         dtime_cur_us = (dtime_cur_s*1000000ll) + (ts_us%1000000ll);
     }
@@ -130,7 +130,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         time_t ts_s = ts_ms/1000;
         struct tm tm;
         char tsstr[24]; // YYYY.mm.dd HH:MM:SS.fff
-        localtime_r(&ts_s, &tm);
+        gmtime_r(&ts_s, &tm);
         snprintf(tsstr, sizeof(tsstr), "%04d.%02d.%02d %02d:%02d:%02d.%03d", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts_ms%1000ll));
         if (av_dict_set(&frame->metadata, "timestamp_ms", tsstr, 0) < 0) {
             av_log(ctx, AV_LOG_ERROR, "'timestamp_ms' metadata adding error.\n");

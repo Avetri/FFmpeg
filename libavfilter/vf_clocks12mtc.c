@@ -15,6 +15,7 @@ typedef struct ClockS12mTcContext {
     const AVClass *class;
 
     int replace_tc;
+    int frame_drift;
     int shift_ms;
     int local_time;
     AVRational rate;
@@ -43,6 +44,7 @@ static const AVOption clocks12mtc_options[] = {
     { "replace_tc", "", OFFSET(replace_tc), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
     { "local_time", "", OFFSET(local_time), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
     */
+    { "frame_drift", "", OFFSET(frame_drift), AV_OPT_TYPE_INT, {.i64 = 5 }, 0, 25, FLAGS },
     { "shift_ms", "", OFFSET(shift_ms), AV_OPT_TYPE_INT, {.i64 = 0 }, -10000, 10000, FLAGS },
     { NULL }
 };
@@ -102,6 +104,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     ts_us_d = ts_us-s->ts_last_us;
     ff_d = (ts_us-s->ts_start_us)/s->frame_us - s->current_frame;
     if ((pts_d > s->frame_max_us) || (pts_d <= 0) ||
+        (abs(ff_d) > s->frame_drift+1) ||
         (ts_us_d > 1000000) || (ts_us_d <= 0)) {
         s->ts_start_us = ts_us-dtime_cur_us;
         s->pts_start = pts_cur;

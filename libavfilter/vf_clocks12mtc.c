@@ -15,6 +15,7 @@ typedef struct ClockS12mTcContext {
     const AVClass *class;
 
     int replace_tc;
+    int frame_drift;
     int shift_ms;
     int local_time;
     AVRational rate;
@@ -27,6 +28,7 @@ typedef struct ClockS12mTcContext {
     int64_t ts_last_us;
     int64_t pts_start;
     int64_t pts_last;
+    int64_t current_frame_ts_us;
     int current_frame;
     int day_frames;
 
@@ -42,6 +44,7 @@ static const AVOption clocks12mtc_options[] = {
     { "replace_tc", "", OFFSET(replace_tc), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
     { "local_time", "", OFFSET(local_time), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
     */
+    { "frame_drift", "", OFFSET(frame_drift), AV_OPT_TYPE_INT, {.i64 = 5 }, 0, 25, FLAGS },
     { "shift_ms", "", OFFSET(shift_ms), AV_OPT_TYPE_INT, {.i64 = 0 }, -10000, 10000, FLAGS },
     { NULL }
 };
@@ -85,6 +88,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     AVTimecode tcr;
     int hh, mm, ss, ff;
     int err;
+    int64_t pts_d, ts_us_d, ff_d;
     int64_t pts_cur = av_rescale_q(frame->pts, inlink->time_base, frame->time_base);
     int64_t ts_us = av_gettime()-(s->shift_ms*1000ll);
     time_t ts_s = (time_t)ts_us/1000000ll;
@@ -92,20 +96,25 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     int64_t dtime_cur_us;
     {
         struct tm tm;
-        localtime_r(&ts_s, &tm);
+        gmtime_r(&ts_s, &tm);
         dtime_cur_s = tm.tm_hour*3600 + tm.tm_min*60 + tm.tm_sec;
         dtime_cur_us = (dtime_cur_s*1000000ll) + (ts_us%1000000ll);
     }
-    if ((abs(pts_cur-s->pts_last) > s->frame_max_us) || (abs(pts_cur-s->pts_last) < s->frame_min_us) ||
-        (abs(ts_us-s->ts_last_us) > s->frame_max_us) || (abs(ts_us-s->ts_last_us) < s->frame_min_us) ||
-        ((ts_us-s->ts_start_us)/s->frame_us != s->current_frame+1)) {
+    pts_d = ((pts_cur-s->pts_last)*1000000ll)/frame->time_base.den;
+    ts_us_d = ts_us-s->ts_last_us;
+    ff_d = (ts_us-s->ts_start_us)/s->frame_us - s->current_frame;
+    if ((pts_d > s->frame_max_us) || (pts_d <= 0) ||
+        (abs(ff_d) > s->frame_drift+1) ||
+        (ts_us_d > 1000000) || (ts_us_d <= 0)) {
         s->ts_start_us = ts_us-dtime_cur_us;
         s->pts_start = pts_cur;
         s->dtime_start_s = 0;
         s->current_frame = dtime_cur_us/s->frame_us;
-        av_log(ctx, AV_LOG_INFO, "Reinit TC due to PTS/time/FF inconsistency.\n");
+        s->current_frame_ts_us = ts_us;
+        av_log(ctx, AV_LOG_INFO, "Reinit TC due to PTS(%" PRId64 ")/time(%" PRId64 ")/FF(%" PRId64 ") differencies inconsistency.\n", pts_d, ts_us_d, ff_d);
     } else {
         s->current_frame += 1;
+        s->current_frame_ts_us += pts_d;
     }
     s->pts_last = pts_cur;
     s->ts_last_us = ts_us;
@@ -120,11 +129,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     err = av_timecode_init_from_components(&tcr, s->rate, AV_TIMECODE_FLAG_24HOURSMAX, hh, mm, ss, ff, ctx);
 
     {
-        int64_t ts_ms = ts_us/1000;
+        int64_t ts_ms = s->current_frame_ts_us/1000;
         time_t ts_s = ts_ms/1000;
         struct tm tm;
         char tsstr[24]; // YYYY.mm.dd HH:MM:SS.fff
-        localtime_r(&ts_s, &tm);
+        gmtime_r(&ts_s, &tm);
         snprintf(tsstr, sizeof(tsstr), "%04d.%02d.%02d %02d:%02d:%02d.%03d", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts_ms%1000ll));
         if (av_dict_set(&frame->metadata, "timestamp_ms", tsstr, 0) < 0) {
             av_log(ctx, AV_LOG_ERROR, "'timestamp_ms' metadata adding error.\n");

@@ -105,6 +105,7 @@ static VANCLineNumber vanc_line_numbers[] = {
     {bmdModeUnknown, 0, -1, -1, -1}
 };
 
+#if BLACKMAGIC_DECKLINK_API_VERSION <= 0x0e020000
 class decklink_allocator : public IDeckLinkMemoryAllocator
 {
 public:
@@ -142,6 +143,201 @@ public:
 private:
         std::atomic<int>  _refs;
 };
+#else
+class decklink_buffer : public IDeckLinkVideoBuffer
+{
+public:
+        decklink_buffer(void *buf): _refs(1) { this->buf = buf; }
+        virtual ~decklink_buffer()
+        {
+            if (nullptr != buf)
+            {
+                av_free(buf);
+            }
+        }
+
+        // IDeckLinkVideoBuffer interface
+           virtual HRESULT     STDMETHODCALLTYPE GetBytes(void** buffer)
+        {
+            if (nullptr == buffer)
+                return E_POINTER;
+
+            *buffer = buf;
+            return S_OK;
+        }
+           virtual HRESULT     STDMETHODCALLTYPE StartAccess(BMDBufferAccessFlags flags) { return S_OK; }
+           virtual HRESULT     STDMETHODCALLTYPE EndAccess(BMDBufferAccessFlags flags) { return S_OK; }
+
+        // IUnknown methods
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, LPVOID *ppv)
+        {
+            HRESULT result = S_OK;
+
+            if (nullptr == ppv)
+                return E_POINTER;
+
+            CFUUIDBytes iunknown = CFUUIDGetUUIDBytes(IUnknownUUID);
+            if (memcmp(&iid, &iunknown, sizeof(REFIID)) == 0)
+            {
+                *ppv = this;
+                AddRef();
+            }
+            else if (memcmp(&iid, &IID_IDeckLinkVideoBuffer, sizeof(REFIID)) == 0)
+            {
+                *ppv = static_cast<IDeckLinkVideoBuffer*>(this);
+                AddRef();
+            }
+            else
+            {
+                *ppv = nullptr;
+                result = E_NOINTERFACE;
+            }
+
+            return result;
+        }
+
+        virtual ULONG   STDMETHODCALLTYPE AddRef(void) { return ++_refs; }
+        virtual ULONG   STDMETHODCALLTYPE Release(void)
+        {
+            int ret = --_refs;
+            if (!ret)
+                delete this;
+            return ret;
+        }
+
+private:
+        std::atomic<int>  _refs;
+        void *buf;
+};
+
+class decklink_allocator : public IDeckLinkVideoBufferAllocator
+{
+public:
+        decklink_allocator(unsigned buffer_size): _refs(1)
+        {
+            this->buffer_size = buffer_size;
+        }
+        virtual ~decklink_allocator() { }
+
+        // IDeckLinkVideoBufferAllocator methods
+           virtual HRESULT STDMETHODCALLTYPE   AllocateVideoBuffer(IDeckLinkVideoBuffer** allocatedBuffer)
+        {
+            if (nullptr == allocatedBuffer)
+                return E_POINTER;
+            void *buf = av_malloc(buffer_size + AV_INPUT_BUFFER_PADDING_SIZE);
+            if (nullptr == buf)
+                return E_OUTOFMEMORY;
+            *allocatedBuffer = new decklink_buffer(buf);
+            if (nullptr == *allocatedBuffer)
+            {
+                av_free(buf);
+                return E_OUTOFMEMORY;
+            }
+            return S_OK;
+        }
+
+        // IUnknown methods
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, LPVOID *ppv)
+        {
+            HRESULT result = S_OK;
+
+            if (ppv == nullptr)
+                return E_POINTER;
+
+            CFUUIDBytes iunknown = CFUUIDGetUUIDBytes(IUnknownUUID);
+            if (memcmp(&iid, &iunknown, sizeof(REFIID)) == 0)
+            {
+                *ppv = this;
+                AddRef();
+            }
+            else if (memcmp(&iid, &IID_IDeckLinkVideoBufferAllocator, sizeof(REFIID)) == 0)
+            {
+                *ppv = static_cast<IDeckLinkVideoBufferAllocator*>(this);
+                AddRef();
+            }
+            else
+            {
+                *ppv = nullptr;
+                result = E_NOINTERFACE;
+            }
+
+            return result;
+        }
+
+        virtual ULONG   STDMETHODCALLTYPE AddRef(void) { return ++_refs; }
+        virtual ULONG   STDMETHODCALLTYPE Release(void)
+        {
+            int ret = --_refs;
+            if (!ret)
+                delete this;
+            return ret;
+        }
+
+private:
+        std::atomic<int>  _refs;
+        unsigned buffer_size;
+};
+
+class decklink_allocator_provider : public IDeckLinkVideoBufferAllocatorProvider
+{
+public:
+        decklink_allocator_provider(): _refs(1) { }
+        virtual ~decklink_allocator_provider() { }
+
+        // IDeckLinkVideoBufferAllocatorProvider interface
+           HRESULT STDMETHODCALLTYPE GetVideoBufferAllocator(  unsigned int buffer_size, unsigned int, unsigned int, unsigned int,
+            BMDPixelFormat, IDeckLinkVideoBufferAllocator **allocator)
+        {
+            HRESULT result = S_OK;
+            if (nullptr == allocator)
+                return E_POINTER;
+            *allocator = new decklink_allocator(buffer_size);
+            if (nullptr == *allocator)
+                return E_OUTOFMEMORY;
+            return result;
+        }
+
+        // IUnknown methods
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, LPVOID *ppv)
+        {
+            HRESULT result = S_OK;
+
+            if (nullptr == ppv)
+                return E_POINTER;
+
+            CFUUIDBytes iunknown = CFUUIDGetUUIDBytes(IUnknownUUID);
+            if (memcmp(&iid, &iunknown, sizeof(REFIID)) == 0)
+            {
+                *ppv = this;
+                AddRef();
+            }
+            else if (memcmp(&iid, &IID_IDeckLinkVideoBufferAllocatorProvider, sizeof(REFIID)) == 0)
+            {
+                *ppv = static_cast<IDeckLinkVideoBufferAllocatorProvider*>(this);
+                AddRef();
+            }
+            else
+            {
+                *ppv = nullptr;
+                result = E_NOINTERFACE;
+            }
+
+            return result;
+        }
+
+        virtual ULONG   STDMETHODCALLTYPE AddRef(void) { return ++_refs; }
+        virtual ULONG   STDMETHODCALLTYPE Release(void)
+        {
+            int ret = --_refs;
+            if (!ret)
+                delete this;
+            return ret;
+        }
+
+private:
+        std::atomic<int>  _refs;
+};
+#endif
 
 extern "C" {
 static void decklink_object_free(void *opaque, uint8_t *data)
@@ -768,7 +964,16 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                     (double)qsize / 1024 / 1024);
         }
 
+#if BLACKMAGIC_DECKLINK_API_VERSION <= 0x0e020000
         videoFrame->GetBytes(&frameBytes);
+#else
+        IDeckLinkVideoBuffer* videoBuffer = nullptr;
+        videoFrame->QueryInterface(IID_IDeckLinkVideoBuffer, (void**)&videoBuffer);
+        videoBuffer->StartAccess(bmdBufferAccessRead);
+        videoBuffer->GetBytes(&frameBytes);
+        videoBuffer->EndAccess(bmdBufferAccessRead);
+        videoBuffer->Release();
+#endif
         videoFrame->GetStreamTime(&frameTime, &frameDuration,
                                   ctx->video_st->time_base.den);
 
@@ -1050,7 +1255,11 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
 {
     struct decklink_cctx *cctx = (struct decklink_cctx *)avctx->priv_data;
     struct decklink_ctx *ctx;
+#if BLACKMAGIC_DECKLINK_API_VERSION <= 0x0e020000
     class decklink_allocator *allocator;
+#else
+    class decklink_allocator_provider *allocator_provider;
+#endif
     class decklink_input_callback *input_callback;
     AVStream *st;
     HRESULT result;
@@ -1139,6 +1348,7 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
         goto error;
     }
 
+#if BLACKMAGIC_DECKLINK_API_VERSION <= 0x0e020000
     allocator = new decklink_allocator();
     ret = (ctx->dli->SetVideoInputFrameMemoryAllocator(allocator) == S_OK ? 0 : AVERROR_EXTERNAL);
     allocator->Release();
@@ -1146,6 +1356,7 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
         av_log(avctx, AV_LOG_ERROR, "Cannot set custom memory allocator\n");
         goto error;
     }
+#endif
 
     if (!cctx->format_code) {
         if (decklink_autodetect(cctx) < 0) {
@@ -1287,9 +1498,19 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
         goto error;
     }
 
+#if BLACKMAGIC_DECKLINK_API_VERSION <= 0x0e020000
     result = ctx->dli->EnableVideoInput(ctx->bmd_mode,
                                         ctx->raw_format,
                                         bmdVideoInputFlagDefault);
+#else
+    allocator_provider = new decklink_allocator_provider();
+    result = ctx->dli->EnableVideoInputWithAllocatorProvider(ctx->bmd_mode,
+                                                             ctx->raw_format,
+                                                             bmdVideoInputFlagDefault,
+                                                             allocator_provider
+                                                            );
+    allocator_provider->Release();
+#endif
 
     if (result != S_OK) {
         av_log(avctx, AV_LOG_ERROR, "Cannot enable video input\n");

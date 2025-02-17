@@ -1142,6 +1142,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
         if (ff_decklink_packet_queue_put(&ctx->queue, &pkt) < 0) {
             ++ctx->dropped;
+            av_log(avctx, AV_LOG_WARNING, "Video packet dropped\n");
         }
     }
 
@@ -1152,10 +1153,18 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
         //hack among hacks
         pkt.size = audioFrame->GetSampleFrameCount() * ctx->audio_st->codecpar->ch_layout.nb_channels * (ctx->audio_depth / 8);
+        pkt.duration = (int64_t)pkt.size * 8 * ctx->audio_st->time_base.den / ctx->audio_depth / ctx->audio_st->codecpar->ch_layout.nb_channels / ctx->audio_st->codecpar->sample_rate / ctx->audio_st->time_base.num;
         audioFrame->GetBytes(&audioFrameBytes);
         audioFrame->GetPacketTime(&audio_pts, ctx->audio_st->time_base.den);
         pkt.pts = get_pkt_pts(videoFrame, audioFrame, wallclock, abs_wallclock, ctx->audio_pts_source, ctx->audio_st->time_base, &initial_audio_pts, cctx->copyts);
         pkt.dts = pkt.pts;
+        if (0 < ctx->last_audio_pts) {
+            if ( ctx->last_audio_pts + ctx->last_audio_dur != pkt.pts ) {
+                av_log(avctx, AV_LOG_WARNING, "Audio inconsistency, prev. %" PRId64 ", d %" PRId64 ", now %" PRId64 "\n", ctx->last_audio_pts, ctx->last_audio_dur, pkt.pts);
+            }
+        }
+        ctx->last_audio_pts = pkt.pts;
+        ctx->last_audio_dur = pkt.duration;
 
         //fprintf(stderr,"Audio Frame size %d ts %d\n", pkt.size, pkt.pts);
         pkt.flags       |= AV_PKT_FLAG_KEY;
@@ -1164,6 +1173,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
         if (ff_decklink_packet_queue_put(&ctx->queue, &pkt) < 0) {
             ++ctx->dropped;
+            av_log(avctx, AV_LOG_WARNING, "Audio packet dropped\n");
         }
     }
 

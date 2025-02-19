@@ -991,6 +991,14 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         videoFrame->GetStreamTime(&frameTime, &frameDuration,
                                   ctx->video_st->time_base.den);
 
+        if (0 < ctx->last_video_pts) {
+            if ( ctx->last_video_pts + ctx->last_video_dur != frameTime ) {
+                av_log(avctx, AV_LOG_WARNING, "Video inconsistency, prev. %" PRId64 ", d %" PRId64 ", now %" PRId64 "\n", ctx->last_video_pts, ctx->last_video_dur, frameTime);
+            }
+        }
+        ctx->last_video_pts = frameTime;
+        ctx->last_video_dur = frameDuration;
+
         if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
             if (ctx->draw_bars && videoFrame->GetPixelFormat() == bmdFormat8BitYUV) {
                 unsigned bars[8] = {
@@ -1173,12 +1181,15 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         pkt.pts = get_pkt_pts(videoFrame, audioFrame, wallclock, abs_wallclock, ctx->audio_pts_source, ctx->audio_st->time_base, &initial_audio_pts, cctx->copyts);
         pkt.dts = pkt.pts;
         if (0 < ctx->last_audio_pts) {
-            if ( ctx->last_audio_pts + ctx->last_audio_dur != pkt.pts ) {
+            if ( ctx->last_audio_pts + ctx->last_audio_dur != audio_pts ) {
                 av_log(avctx, AV_LOG_WARNING, "Audio inconsistency, prev. %" PRId64 ", d %" PRId64 ", now %" PRId64 "\n", ctx->last_audio_pts, ctx->last_audio_dur, pkt.pts);
             }
         }
-        ctx->last_audio_pts = pkt.pts;
+        ctx->last_audio_pts = audio_pts;
         ctx->last_audio_dur = pkt.duration;
+        if (ctx->last_audio_pts != ctx->last_video_pts || ctx->last_audio_dur != ctx->last_video_dur) {
+            av_log(avctx, AV_LOG_WARNING, "A/V streams inconsistency, %" PRId64 ":%" PRId64 " != %" PRId64 ":%" PRId64 "\n", ctx->last_audio_pts, ctx->last_audio_dur, ctx->last_video_pts, ctx->last_video_dur);
+        }
 
         //fprintf(stderr,"Audio Frame size %d ts %d\n", pkt.size, pkt.pts);
         pkt.flags       |= AV_PKT_FLAG_KEY;

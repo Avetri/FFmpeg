@@ -127,6 +127,8 @@ struct decklink_ctx {
     int playback_started;
     int64_t first_pts;
     int64_t last_pts;
+    int64_t last_video_pts;
+    int64_t last_video_dur;
     int64_t last_audio_pts;
     int64_t last_audio_dur;
     unsigned long frameCount;

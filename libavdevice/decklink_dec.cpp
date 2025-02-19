@@ -926,7 +926,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     BMDTimeValue frameDuration;
     int64_t wallclock = 0, abs_wallclock = 0;
     struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
-    bool signalLocked = false, refLocked = false;
+    bool signalLocked = false;
 
     if (S_OK != ctx->dls->GetFlag(bmdDeckLinkStatusVideoInputSignalLocked, &signalLocked)) {
         av_log(avctx, AV_LOG_ERROR, "Can't get video input signal lock status\n");
@@ -939,18 +939,6 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
             }
         }
         ctx->last_sig_lock = signalLocked;
-    }
-    if (S_OK != ctx->dls->GetFlag(bmdDeckLinkStatusReferenceSignalLocked, &refLocked)) {
-        av_log(avctx, AV_LOG_ERROR, "Can't get reference signal lock status\n");
-    } else {
-        if (ctx->last_ref_lock != refLocked) {
-            if (false == refLocked) {
-                av_log(avctx, AV_LOG_INFO, "Reference signal unlocked\n");
-            } else {
-                av_log(avctx, AV_LOG_INFO, "Reference signal locked\n");
-            }
-        }
-        ctx->last_ref_lock = refLocked;
     }
 
     if (ctx->autodetect) {

@@ -137,7 +137,6 @@ struct decklink_ctx {
     AVStream *teletext_st;
     uint16_t cdp_sequence_num;
     bool last_sig_lock;
-    bool last_ref_lock;
 
     /* Options */
     int list_devices;

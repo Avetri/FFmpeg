@@ -1188,7 +1188,14 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         ctx->last_audio_pts = audio_pts;
         ctx->last_audio_dur = pkt.duration;
         if (ctx->last_audio_pts != ctx->last_video_pts || ctx->last_audio_dur != ctx->last_video_dur) {
-            av_log(avctx, AV_LOG_WARNING, "A/V streams inconsistency, %" PRId64 ":%" PRId64 " != %" PRId64 ":%" PRId64 "\n", ctx->last_audio_pts, ctx->last_audio_dur, ctx->last_video_pts, ctx->last_video_dur);
+            if (ctx->last_pts_diff != ctx->last_audio_pts - ctx->last_video_pts || ctx->last_dur_diff != ctx->last_audio_dur - ctx->last_video_dur) {
+                ctx->last_pts_diff = ctx->last_audio_pts - ctx->last_video_pts;
+                ctx->last_dur_diff = ctx->last_audio_dur - ctx->last_video_dur;
+                av_log(avctx, AV_LOG_WARNING, "A/V streams inconsistency, %" PRId64 ":%" PRId64 " != %" PRId64 ":%" PRId64 "\n", ctx->last_audio_pts, ctx->last_audio_dur, ctx->last_video_pts, ctx->last_video_dur);
+            }
+        } else {
+            ctx->last_pts_diff = 0;
+            ctx->last_dur_diff = 0;
         }
 
         //fprintf(stderr,"Audio Frame size %d ts %d\n", pkt.size, pkt.pts);

@@ -131,6 +131,8 @@ struct decklink_ctx {
     int64_t last_video_dur;
     int64_t last_audio_pts;
     int64_t last_audio_dur;
+    int64_t last_pts_diff;
+    int64_t last_dur_diff;
     unsigned long frameCount;
     unsigned int dropped;
     AVStream *audio_st;

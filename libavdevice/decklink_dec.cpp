@@ -926,6 +926,20 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     BMDTimeValue frameDuration;
     int64_t wallclock = 0, abs_wallclock = 0;
     struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
+    bool signalLocked = false;
+
+    if (S_OK != ctx->dls->GetFlag(bmdDeckLinkStatusVideoInputSignalLocked, &signalLocked)) {
+        av_log(avctx, AV_LOG_ERROR, "Can't get video input signal lock status\n");
+    } else {
+        if (ctx->last_sig_lock != signalLocked) {
+            if (false == signalLocked) {
+                av_log(avctx, AV_LOG_INFO, "Video signal unlocked\n");
+            } else {
+                av_log(avctx, AV_LOG_INFO, "Video signal locked\n");
+            }
+        }
+        ctx->last_sig_lock = signalLocked;
+    }
 
     if (ctx->autodetect) {
         if (videoFrame && !(videoFrame->GetFlags() & bmdFrameHasNoInputSource) &&
@@ -976,6 +990,14 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 #endif
         videoFrame->GetStreamTime(&frameTime, &frameDuration,
                                   ctx->video_st->time_base.den);
+
+        if (0 < ctx->last_video_pts) {
+            if ( ctx->last_video_pts + ctx->last_video_dur != frameTime ) {
+                av_log(avctx, AV_LOG_WARNING, "Video inconsistency, prev. %" PRId64 ", d %" PRId64 ", now %" PRId64 "\n", ctx->last_video_pts, ctx->last_video_dur, frameTime);
+            }
+        }
+        ctx->last_video_pts = frameTime;
+        ctx->last_video_dur = frameDuration;
 
         if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
             if (ctx->draw_bars && videoFrame->GetPixelFormat() == bmdFormat8BitYUV) {
@@ -1142,6 +1164,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
         if (ff_decklink_packet_queue_put(&ctx->queue, &pkt) < 0) {
             ++ctx->dropped;
+            av_log(avctx, AV_LOG_WARNING, "Video packet dropped\n");
         }
     }
 
@@ -1152,10 +1175,29 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
         //hack among hacks
         pkt.size = audioFrame->GetSampleFrameCount() * ctx->audio_st->codecpar->ch_layout.nb_channels * (ctx->audio_depth / 8);
+        pkt.duration = (int64_t)pkt.size * 8 * ctx->audio_st->time_base.den / ctx->audio_depth / ctx->audio_st->codecpar->ch_layout.nb_channels / ctx->audio_st->codecpar->sample_rate / ctx->audio_st->time_base.num;
         audioFrame->GetBytes(&audioFrameBytes);
         audioFrame->GetPacketTime(&audio_pts, ctx->audio_st->time_base.den);
         pkt.pts = get_pkt_pts(videoFrame, audioFrame, wallclock, abs_wallclock, ctx->audio_pts_source, ctx->audio_st->time_base, &initial_audio_pts, cctx->copyts);
         pkt.dts = pkt.pts;
+        if (0 < ctx->last_audio_pts) {
+            if ( ctx->last_audio_pts + ctx->last_audio_dur != audio_pts ) {
+                av_log(avctx, AV_LOG_WARNING, "Audio inconsistency, prev. %" PRId64 ", d %" PRId64 ", now %" PRId64 "\n", ctx->last_audio_pts, ctx->last_audio_dur, pkt.pts);
+            }
+        }
+        ctx->last_audio_pts = audio_pts;
+        ctx->last_audio_dur = pkt.duration;
+        if (ctx->last_audio_pts != ctx->last_video_pts || ctx->last_audio_dur != ctx->last_video_dur) {
+            if (ctx->last_pts_diff != ctx->last_audio_pts - ctx->last_video_pts || ctx->last_dur_diff != ctx->last_audio_dur - ctx->last_video_dur) {
+                ctx->last_pts_diff = ctx->last_audio_pts - ctx->last_video_pts;
+                ctx->last_dur_diff = ctx->last_audio_dur - ctx->last_video_dur;
+                av_log(avctx, AV_LOG_WARNING, "A/V streams inconsistency, %" PRId64 ":%" PRId64 " != %" PRId64 ":%" PRId64 "\n", ctx->last_audio_pts, ctx->last_audio_dur, ctx->last_video_pts, ctx->last_video_dur);
+            }
+        } else if (0 != ctx->last_pts_diff || 0 != ctx->last_dur_diff) {
+            av_log(avctx, AV_LOG_WARNING, "A/V streams inconsistency normalized \n");
+            ctx->last_pts_diff = 0;
+            ctx->last_dur_diff = 0;
+        }
 
         //fprintf(stderr,"Audio Frame size %d ts %d\n", pkt.size, pkt.pts);
         pkt.flags       |= AV_PKT_FLAG_KEY;
@@ -1164,6 +1206,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
         if (ff_decklink_packet_queue_put(&ctx->queue, &pkt) < 0) {
             ++ctx->dropped;
+            av_log(avctx, AV_LOG_WARNING, "Audio packet dropped\n");
         }
     }
 
@@ -1322,6 +1365,14 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
     /* Get input device. */
     if (ctx->dl->QueryInterface(IID_IDeckLinkInput, (void **) &ctx->dli) != S_OK) {
         av_log(avctx, AV_LOG_ERROR, "Could not open input device from '%s'\n",
+               avctx->url);
+        ret = AVERROR(EIO);
+        goto error;
+    }
+
+    /* Get device status. */
+    if (ctx->dl->QueryInterface(IID_IDeckLinkStatus, (void **) &ctx->dls) != S_OK) {
+        av_log(avctx, AV_LOG_ERROR, "Could not get device status '%s'\n",
                avctx->url);
         ret = AVERROR(EIO);
         goto error;

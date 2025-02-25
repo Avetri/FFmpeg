@@ -94,6 +94,7 @@ struct decklink_ctx {
     IDeckLink *dl;
     IDeckLinkOutput *dlo;
     IDeckLinkInput *dli;
+    IDeckLinkStatus *dls;
     IDeckLinkConfiguration *cfg;
     IDeckLinkProfileAttributes *attr;
     decklink_output_callback *output_callback;
@@ -126,6 +127,12 @@ struct decklink_ctx {
     int playback_started;
     int64_t first_pts;
     int64_t last_pts;
+    int64_t last_video_pts;
+    int64_t last_video_dur;
+    int64_t last_audio_pts;
+    int64_t last_audio_dur;
+    int64_t last_pts_diff;
+    int64_t last_dur_diff;
     unsigned long frameCount;
     unsigned int dropped;
     AVStream *audio_st;
@@ -133,6 +140,7 @@ struct decklink_ctx {
     AVStream *klv_st;
     AVStream *teletext_st;
     uint16_t cdp_sequence_num;
+    bool last_sig_lock;
 
     /* Options */
     int list_devices;

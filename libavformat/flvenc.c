@@ -27,6 +27,7 @@
 #include "libavutil/mathematics.h"
 #include "libavcodec/codec_desc.h"
 #include "libavcodec/mpeg4audio.h"
+#include "libavcodec/bsf.h"
 #include "avio.h"
 #include "avc.h"
 #include "av1.h"
@@ -778,6 +779,12 @@ static int flv_init(struct AVFormatContext *s)
 
     for (i = 0; i < s->nb_streams; i++) {
         AVCodecParameters *par = s->streams[i]->codecpar;
+        AVStream * st = s->streams[i];
+        FFStream * ffs = ffstream(st);
+        if (NULL != ffs->bsfc)
+        {
+            av_bsf_flush(ffs->bsfc);
+        }
 
         switch (par->codec_type) {
         case AVMEDIA_TYPE_VIDEO:

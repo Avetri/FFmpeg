@@ -424,7 +424,7 @@ static int libsrt_set_options_pre(URLContext *h, int fd)
 
 static int libsrt_setup(URLContext *h, int reconnect)
 {
-    struct addrinfo hints = { 0 }, *ai, *cur_ai;
+    struct addrinfo hints = { 0 }, *ai = NULL, *cur_ai = NULL;
     int port, fd;
     SRTContext *s = h->priv_data;
     const char *p;
@@ -460,12 +460,39 @@ static int libsrt_setup(URLContext *h, int reconnect)
     snprintf(portstr, sizeof(portstr), "%d", port);
     if (s->mode == SRT_MODE_LISTENER)
         hints.ai_flags |= AI_PASSIVE;
+regetaddrinfo:
+    if (NULL != ai) {
+        freeaddrinfo(ai);
+        ai = NULL;
+    }
     ret = getaddrinfo(hostname[0] ? hostname : NULL, portstr, &hints, &ai);
     if (ret) {
         av_log(h, AV_LOG_ERROR,
                "Failed to resolve hostname %s: %s\n",
                hostname, gai_strerror(ret));
         return AVERROR(EIO);
+    } else {
+        for (struct addrinfo *ai_lst = ai; ai_lst != NULL; ai_lst = ai_lst->ai_next) {
+            if (ai_lst->ai_family == AF_INET) {
+                char ipstr[INET_ADDRSTRLEN];
+                struct sockaddr_in *ipv4 = (struct sockaddr_in *)ai_lst->ai_addr;
+                inet_ntop(ai_lst->ai_family, (void *)&(ipv4->sin_addr), ipstr, sizeof ipstr);
+                av_log(h, AV_LOG_INFO,
+                        "Resolved hostname \"%s\" as \"%s\"\n",
+                        hostname, ipstr);
+#if HAVE_STRUCT_SOCKADDR_IN6
+            } else if (ai_lst->ai_family == AF_INET6) {
+                char ipstr[INET6_ADDRSTRLEN];
+                struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)ai_lst->ai_addr;
+                inet_ntop(ai_lst->ai_family, (void *)&(ipv6->sin6_addr), ipstr, sizeof ipstr);
+                av_log(h, AV_LOG_INFO,
+                        "Resolved hostname \"%s\" as \"%s\"\n",
+                        hostname, ipstr);
+#endif
+            } else {
+                av_log(h, AV_LOG_ERROR, "Unknown INET address family: %d\n", ai_lst->ai_family);
+            }
+        }
     }
 
     cur_ai = ai;
@@ -552,24 +579,59 @@ static int libsrt_setup(URLContext *h, int reconnect)
     s->fd = fd;
     s->eid = eid;
 
+    if (cur_ai->ai_family == AF_INET) {
+        char ipstr[INET_ADDRSTRLEN];
+        struct sockaddr_in *ipv4 = (struct sockaddr_in *)cur_ai->ai_addr;
+        inet_ntop(cur_ai->ai_family, (void *)&(ipv4->sin_addr), ipstr, sizeof ipstr);
+        av_log(h, AV_LOG_INFO,
+                "Connected to \"%s\" through \"%s\"\n",
+                hostname, ipstr);
+#if HAVE_STRUCT_SOCKADDR_IN6
+    } else if (cur_ai->ai_family == AF_INET6) {
+        char ipstr[INET6_ADDRSTRLEN];
+        struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)cur_ai->ai_addr;
+        inet_ntop(cur_ai->ai_family, (void *)&(ipv6->sin6_addr), ipstr, sizeof ipstr);
+        av_log(h, AV_LOG_INFO,
+                "Connected to \"%s\" through \"%s\"\n",
+                hostname, ipstr);
+#endif
+    }
+
     freeaddrinfo(ai);
     return 0;
 
  fail:
-    if (1 == reconnect) {
-        av_log(h, AV_LOG_WARNING, "%s(): Reconnecting on a connection setuping failure ...\n", __FUNCTION__);
-        if (fd >= 0)
-            srt_close(fd);
-        ret = 0;
-        goto restart;
+    if (cur_ai->ai_family == AF_INET) {
+        char ipstr[INET_ADDRSTRLEN];
+        struct sockaddr_in *ipv4 = (struct sockaddr_in *)cur_ai->ai_addr;
+        inet_ntop(cur_ai->ai_family, (void *)&(ipv4->sin_addr), ipstr, sizeof ipstr);
+        av_log(h, AV_LOG_INFO,
+                "Failed to connect to \"%s\" through \"%s\"\n",
+                hostname, ipstr);
+#if HAVE_STRUCT_SOCKADDR_IN6
+    } else if (cur_ai->ai_family == AF_INET6) {
+        char ipstr[INET6_ADDRSTRLEN];
+        struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)cur_ai->ai_addr;
+        inet_ntop(cur_ai->ai_family, (void *)&(ipv6->sin6_addr), ipstr, sizeof ipstr);
+        av_log(h, AV_LOG_INFO,
+                "Failed to connect to \"%s\" through \"%s\"\n",
+                hostname, ipstr);
+#endif
     }
     if (cur_ai->ai_next) {
         /* Retry with the next sockaddr */
+        av_log(h, AV_LOG_WARNING, "%s(): Use next address to connect ...\n", __FUNCTION__);
         cur_ai = cur_ai->ai_next;
         if (fd >= 0)
             srt_close(fd);
         ret = 0;
         goto restart;
+    } else if (1 == reconnect) {
+        av_log(h, AV_LOG_WARNING, "%s(): Get address info again on no address left ...\n", __FUNCTION__);
+        if (fd >= 0)
+            srt_close(fd);
+        ret = 0;
+        goto regetaddrinfo;
     }
  fail1:
     if (fd >= 0)
@@ -596,7 +658,7 @@ static void * libsrt_thread_tx(void * data)
         if (0 == s->connected && SRT_OF_ABORT == s->onfail) {
             break;
         }
-        if (0 == s->connected && SRT_OF_CONNECT == s->onfail && 0 == libsrt_setup(h, 0)) {
+        if (0 == s->connected && SRT_OF_CONNECT == s->onfail && 0 == libsrt_setup(h, 1)) {
             s->connected = 1;
         }
 

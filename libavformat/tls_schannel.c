@@ -69,6 +69,65 @@ typedef struct TLSContext {
     int sspi_close_notify;
 } TLSContext;
 
+int ff_tls_set_external_socket(URLContext *h, URLContext *sock)
+{
+    TLSContext *c = h->priv_data;
+    TLSShared *s = &c->tls_shared;
+
+    if (s->is_dtls)
+        c->tls_shared.udp = sock;
+    else
+        c->tls_shared.tcp = sock;
+
+    return 0;
+}
+
+int ff_dtls_export_materials(URLContext *h, char *dtls_srtp_materials, size_t materials_sz)
+{
+#if HAVE_SECPKGCONTEXT_KEYINGMATERIALINFO
+    TLSContext *c = h->priv_data;
+
+    SecPkgContext_KeyingMaterialInfo keying_info = { 0 };
+    SecPkgContext_KeyingMaterial keying_material = { 0 };
+
+    const char* dst = "EXTRACTOR-dtls_srtp";
+    SECURITY_STATUS sspi_ret;
+
+    if (!c->have_context)
+        return AVERROR(EINVAL);
+
+    keying_info.cbLabel = strlen(dst) + 1;
+    keying_info.pszLabel = (LPSTR)dst;
+    keying_info.cbContextValue = 0;
+    keying_info.pbContextValue = NULL;
+    keying_info.cbKeyingMaterial = materials_sz;
+
+    sspi_ret = SetContextAttributes(&c->ctxt_handle, SECPKG_ATTR_KEYING_MATERIAL_INFO, &keying_info, sizeof(keying_info));
+    if (sspi_ret != SEC_E_OK) {
+        av_log(h, AV_LOG_ERROR, "Setting keying material info failed: %lx\n", sspi_ret);
+        return AVERROR_EXTERNAL;
+    }
+
+    sspi_ret = QueryContextAttributes(&c->ctxt_handle, SECPKG_ATTR_KEYING_MATERIAL, &keying_material);
+    if (sspi_ret != SEC_E_OK) {
+        av_log(h, AV_LOG_ERROR, "Querying keying material failed: %lx\n", sspi_ret);
+        return AVERROR_EXTERNAL;
+    }
+
+    memcpy(dtls_srtp_materials, keying_material.pbKeyingMaterial, FFMIN(materials_sz, keying_material.cbKeyingMaterial));
+    FreeContextBuffer(keying_material.pbKeyingMaterial);
+
+    if (keying_material.cbKeyingMaterial > materials_sz) {
+        av_log(h, AV_LOG_WARNING, "Keying material size mismatch: %ld > %zu\n", keying_material.cbKeyingMaterial, materials_sz);
+        return AVERROR(ENOSPC);
+    }
+
+    return 0;
+#else
+    return AVERROR(ENOSYS);
+#endif
+}
+
 static void init_sec_buffer(SecBuffer *buffer, unsigned long type,
                             void *data, unsigned long size)
 {
@@ -85,10 +144,40 @@ static void init_sec_buffer_desc(SecBufferDesc *desc, SecBuffer *buffers,
     desc->cBuffers = buffer_count;
 }
 
+static int tls_process_send_buffer(URLContext *h)
+{
+    TLSContext *c = h->priv_data;
+    TLSShared *s = &c->tls_shared;
+    URLContext *uc = s->is_dtls ? s->udp : s->tcp;
+    int ret;
+
+    if (!c->send_buf)
+        return 0;
+
+    ret = ffurl_write(uc, c->send_buf + c->send_buf_offset, c->send_buf_size - c->send_buf_offset);
+    if (ret == AVERROR(EAGAIN)) {
+        return AVERROR(EAGAIN);
+    } else if (ret < 0) {
+        av_log(h, AV_LOG_ERROR, "Writing encrypted data to socket failed\n");
+        return AVERROR(EIO);
+    }
+
+    c->send_buf_offset += ret;
+
+    if (c->send_buf_offset < c->send_buf_size)
+        return AVERROR(EAGAIN);
+
+    av_freep(&c->send_buf);
+    c->send_buf_size = c->send_buf_offset = 0;
+
+    return 0;
+}
+
 static int tls_shutdown_client(URLContext *h)
 {
     TLSContext *c = h->priv_data;
     TLSShared *s = &c->tls_shared;
+    URLContext *uc = s->is_dtls ? s->udp : s->tcp;
     int ret;
 
     if (c->connected) {
@@ -331,21 +420,70 @@ fail:
     return ret;
 }
 
+static int tls_server_handshake(URLContext *h)
+{
+    TLSContext *c = h->priv_data;
+    TLSShared *s = &c->tls_shared;
+
+    c->request_flags = ASC_REQ_SEQUENCE_DETECT | ASC_REQ_REPLAY_DETECT |
+                       ASC_REQ_CONFIDENTIALITY | ASC_REQ_ALLOCATE_MEMORY;
+    if (s->is_dtls)
+        c->request_flags |= ASC_REQ_DATAGRAM;
+    else
+        c->request_flags |= ASC_REQ_STREAM;
+
+    c->have_context = 0;
+
+    return tls_handshake_loop(h, 1);
+}
+
+static int tls_handshake(URLContext *h)
+{
+    TLSContext *c = h->priv_data;
+    TLSShared *s = &c->tls_shared;
+    SECURITY_STATUS sspi_ret;
+    int ret = 0;
+
+    if (s->listen)
+        ret = tls_server_handshake(h);
+    else
+        ret = tls_client_handshake(h);
+
+    if (ret < 0)
+        goto fail;
+
+#if CONFIG_DTLS_PROTOCOL
+    if (s->is_dtls && s->mtu > 0) {
+        ULONG mtu = s->mtu;
+        sspi_ret = SetContextAttributes(&c->ctxt_handle, SECPKG_ATTR_DTLS_MTU, &mtu, sizeof(mtu));
+        if (sspi_ret != SEC_E_OK) {
+            av_log(h, AV_LOG_ERROR, "Failed setting DTLS MTU to %d.\n", s->mtu);
+            ret = AVERROR(EINVAL);
+            goto fail;
+        }
+        av_log(h, AV_LOG_VERBOSE, "Set DTLS MTU to %d\n", s->mtu);
+    }
+#endif
+
+    c->connected = 1;
+
+fail:
+    return ret;
+}
+
 static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
 {
     TLSContext *c = h->priv_data;
     TLSShared *s = &c->tls_shared;
     SECURITY_STATUS sspi_ret;
     SCHANNEL_CRED schannel_cred = { 0 };
-    int ret;
+    PCCERT_CONTEXT crtctx = NULL;
+    NCRYPT_KEY_HANDLE key = 0;
+    int ret = 0;
 
-    if ((ret = ff_tls_open_underlying(s, h, uri, options)) < 0)
-        goto fail;
-
-    if (s->listen) {
-        av_log(h, AV_LOG_ERROR, "TLS Listen Sockets with SChannel is not implemented.\n");
-        ret = AVERROR(EINVAL);
-        goto fail;
+    if (!s->external_sock) {
+        if ((ret = ff_tls_open_underlying(s, h, uri, options)) < 0)
+            goto fail;
     }
 
     /* SChannel Options */

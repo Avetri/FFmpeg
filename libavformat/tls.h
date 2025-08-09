@@ -62,6 +62,7 @@ typedef struct TLSShared {
     URLContext *tcp;
 
     int is_dtls;
+    int use_srtp;
 
     enum DTLSState state;
 

@@ -42,7 +42,6 @@
 #endif
 
 typedef struct TLSContext {
-    const AVClass *class;
     TLSShared tls_shared;
 
     CredHandle cred_handle;

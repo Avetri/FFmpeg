@@ -242,6 +242,14 @@ fail:
     return ret;
 }
 
+static int dtls_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
+{
+    TLSContext *c = h->priv_data;
+    TLSShared *s = &c->tls_shared;
+    s->is_dtls = 1;
+    return tls_open(h, uri, flags, options);
+}
+
 static int tls_read(URLContext *h, uint8_t *buf, int size)
 {
     TLSContext *c = h->priv_data;

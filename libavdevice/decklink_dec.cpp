@@ -1044,12 +1044,16 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                     AVRational rate;
                     int flags, hh, mm, ss, ff;
 
+                    if (cctx->tc_handle) {
+                        tcr.flags |= AV_TIMECODE_FLAG_24HOURSMAX;
+                    }
+
                     // Get current real time and align to the TC
                     ts_us = av_gettime();
                     ts_s = (time_t)ts_us/1000000ll;
                     ts_s_mstail = (ts_us%1000000ll)/1000;
                     gmtime_r(&ts_s, &tm);
-                    if (0 == av_timecode_extract_components(&tcr, &rate, &flags, &hh, &mm, &ss, &ff, ctx)) {
+                    if (cctx->tc_handle && 0 == av_timecode_extract_components(&tcr, &rate, &flags, &hh, &mm, &ss, &ff, ctx)) {
                         tm.tm_hour = hh%24;
                         tm.tm_min = mm;
                         tm.tm_sec = ss;

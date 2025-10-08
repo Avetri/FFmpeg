@@ -72,6 +72,7 @@ static const AVOption options[] = {
 #if BLACKMAGIC_DECKLINK_API_VERSION >= 0x0b000000
     { "rp188hfr",      NULL,                                          0,  AV_OPT_TYPE_CONST, { .i64 = 8}, 0, 0,    DEC, .unit = "tc_format"},
 #endif
+    { "timecode_handle", "handle input timecodes",    OFFSET(tc_handle),  AV_OPT_TYPE_BOOL,  { .i64 = 0}, 0, 1,    DEC },
     { "video_input",  "video input",              OFFSET(video_input),    AV_OPT_TYPE_INT,   { .i64 = 0}, 0, 6,    DEC, .unit = "video_input"},
     { "unset",         NULL,                                          0,  AV_OPT_TYPE_CONST, { .i64 = 0}, 0, 0,    DEC, .unit = "video_input"},
     { "sdi",           NULL,                                          0,  AV_OPT_TYPE_CONST, { .i64 = 1}, 0, 0,    DEC, .unit = "video_input"},

@@ -134,7 +134,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         struct tm tm;
         char tsstr[24]; // YYYY.mm.dd HH:MM:SS.fff
         gmtime_r(&ts_s, &tm);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
         snprintf(tsstr, sizeof(tsstr), "%04d.%02d.%02d %02d:%02d:%02d.%03d", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts_ms%1000ll));
+#pragma GCC diagnostic pop
         if (av_dict_set(&frame->metadata, "timestamp_ms", tsstr, 0) < 0) {
             av_log(ctx, AV_LOG_ERROR, "'timestamp_ms' metadata adding error.\n");
         }

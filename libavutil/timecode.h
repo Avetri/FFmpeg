@@ -210,4 +210,21 @@ int av_timecode_init_from_string(AVTimecode *tc, AVRational rate, const char *st
  */
 int av_timecode_check_frame_rate(AVRational rate);
 
+/**
+ * Extract timecode components from a timecode struct.
+ *
+ * @param tc          timecode data correctly initialized
+ * @param rate        a ponter to frame rate in rational form
+ * @param flags       a pointer to miscellaneous flags such as drop frame, +24 hours, ...
+ *                    (see AVTimecodeFlag)
+ * @param hh          a pointer to hours
+ * @param mm          a pointer to minutes
+ * @param ss          a pointer to seconds
+ * @param ff          a pointer to frames
+ * @param log_ctx     a pointer to an arbitrary struct of which the first field
+ *                    is a pointer to an AVClass struct (used for av_log)
+ * @return            0 on success, AVERROR otherwise
+ */
+int av_timecode_extract_components(const AVTimecode *tc, AVRational *rate, int *flags, int *hh, int *mm, int *ss, int *ff, void *log_ctx);
+
 #endif /* AVUTIL_TIMECODE_H */

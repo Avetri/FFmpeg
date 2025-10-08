@@ -292,3 +292,21 @@ int av_timecode_init_from_string(AVTimecode *tc, AVRational rate, const char *st
 
     return av_timecode_init_from_components(tc, rate, flags, hh, mm, ss, ff, log_ctx);
 }
+
+int av_timecode_extract_components(const AVTimecode *tc, AVRational *rate, int *flags, int *hh, int *mm, int *ss, int *ff, void *log_ctx)
+{
+    int ret;
+
+    ret = check_timecode(log_ctx, tc);
+    if (ret < 0)
+        return ret;
+
+    *flags = tc->flags;
+    *rate = tc->rate;
+    *ff = tc->start%tc->fps;
+    *ss = (tc->start/tc->fps)%60;
+    *mm = (tc->start/tc->fps/60)%60;
+    *hh = (tc->start/tc->fps/3600);
+
+    return 0;
+}

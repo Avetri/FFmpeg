@@ -1029,12 +1029,40 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
             // Handle Timecode (if requested)
             if (ctx->tc_format) {
                 AVTimecode tcr;
+                // TODO: [decklink] Add timezone correction control: automatic shift TC to UTC if minutes and seconds are close to real time
+                // TODO: [decklink] Add TC emergency ignoration: produce no TC if time is unproportionally shifted
+                // TODO: [decklink] Produce artificial TC on a gap
                 if (get_frame_timecode(avctx, ctx, &tcr, videoFrame) >= 0) {
                     char tcstr[AV_TIMECODE_STR_SIZE];
-                    const char *tc = av_timecode_make_string(&tcr, tcstr, 0);
+                    char tcmsstr[AV_TIMECODE_STR_SIZE];
+                    const char *tc = NULL;
+                    const char *tc_ms = NULL;
+                    int64_t ts_us;
+                    time_t ts_s;
+                    int ts_s_mstail;
+                    struct tm tm;
+                    AVRational rate;
+                    int flags, hh, mm, ss, ff;
+
+                    // Get current real time and align to the TC
+                    ts_us = av_gettime();
+                    ts_s = (time_t)ts_us/1000000ll;
+                    ts_s_mstail = (ts_us%1000000ll)/1000;
+                    gmtime_r(&ts_s, &tm);
+                    if (0 == av_timecode_extract_components(&tcr, &rate, &flags, &hh, &mm, &ss, &ff, ctx)) {
+                        tm.tm_hour = hh%24;
+                        tm.tm_min = mm;
+                        tm.tm_sec = ss;
+                        ts_s_mstail = (ff*rate.den*1000)/rate.num;
+                    }
+
+                    tc = av_timecode_make_string(&tcr, tcstr, 0);
+                    tc_ms = av_timecode_make_string_ms(&tcr, tcmsstr, 0);
                     if (tc) {
                         AVDictionary* metadata_dict = NULL;
                         uint8_t* packed_metadata;
+                        char tsstr[24]; // YYYY.mm.dd HH:MM:SS.fff
+                        int tc_set, tc_ms_set, ts_ms_set;
 
                         if (av_cmp_q(ctx->video_st->r_frame_rate, av_make_q(60, 1)) < 1) {
                             uint32_t tc_data = av_timecode_get_smpte_from_framenum(&tcr, 0);
@@ -1047,7 +1075,22 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                             }
                         }
 
-                        if (av_dict_set(&metadata_dict, "timecode", tc, 0) >= 0) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+                        snprintf(tsstr, sizeof(tsstr), "%04d.%02d.%02d %02d:%02d:%02d.%03d", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ts_s_mstail);
+#pragma GCC diagnostic pop
+
+                        if (0 > (tc_set = av_dict_set(&metadata_dict, "timecode", tc, 0))) {
+                            av_log(avctx, AV_LOG_ERROR, "Unable to set 'timecode' metadata to a dictionary\n");
+                        }
+                        if (0 > (tc_ms_set = av_dict_set(&metadata_dict, "timecode_ms", tc_ms, 0))) {
+                            av_log(avctx, AV_LOG_ERROR, "Unable to set 'timecode_ms' metadata to a dictionary\n");
+                        }
+                        if (0 > (ts_ms_set = av_dict_set(&metadata_dict, "timestamp_ms", tsstr, 0))) {
+                            av_log(avctx, AV_LOG_ERROR, "Unable to set 'timestamp_ms' metadata to a dictionary\n");
+                        }
+
+                        if (tc_set >= 0 || tc_ms_set >= 0 || ts_ms_set >= 0) {
                             size_t metadata_len;
                             packed_metadata = av_packet_pack_dictionary(metadata_dict, &metadata_len);
                             av_dict_free(&metadata_dict);
@@ -1591,7 +1634,11 @@ int ff_decklink_read_packet(AVFormatContext *avctx, AVPacket *pkt)
 
     ff_decklink_packet_queue_get(&ctx->queue, pkt, 1);
 
-    if (ctx->tc_format && !(av_dict_get(ctx->video_st->metadata, "timecode", NULL, 0))) {
+    if (ctx->tc_format && (
+        !av_dict_get(ctx->video_st->metadata, "timecode", NULL, 0) ||
+        !av_dict_get(ctx->video_st->metadata, "timecode_ms", NULL, 0) ||
+        !av_dict_get(ctx->video_st->metadata, "timestamp_ms", NULL, 0)
+    )) {
         size_t size;
         const uint8_t *side_metadata = av_packet_get_side_data(pkt, AV_PKT_DATA_STRINGS_METADATA, &size);
         if (side_metadata) {

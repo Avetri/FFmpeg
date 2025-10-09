@@ -1014,15 +1014,16 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                 }
             }
 
+            ctx->dropped++;
             if (!no_video) {
                 av_log(avctx, AV_LOG_WARNING, "Frame received (#%lu) - No input signal detected "
-                        "- Frames dropped %u\n", ctx->frameCount, ++ctx->dropped);
+                        "- Frames dropped %u\n", ctx->frameCount, ctx->dropped);
             }
             no_video = 1;
         } else {
             if (no_video) {
                 av_log(avctx, AV_LOG_WARNING, "Frame received (#%lu) - Input returned "
-                        "- Frames dropped %u\n", ctx->frameCount, ++ctx->dropped);
+                        "- Frames dropped %u\n", ctx->frameCount, ctx->dropped);
             }
             no_video = 0;
 

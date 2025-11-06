@@ -18,6 +18,7 @@ typedef struct ClockS12mTcContext {
     int frame_drift;
     int shift_ms;
     int local_time;
+    int udu_sei;
     AVRational rate;
     double d_rate;
     int64_t frame_us;
@@ -39,6 +40,11 @@ typedef struct ClockS12mTcContext {
 #define OFFSET(x) offsetof(ClockS12mTcContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 
+#define UDU_SEI_JSON_UUID "e6e576a52e1c452a"
+#define UDU_SEI_NONE 0
+#define UDU_SEI_JSON 1
+#define UDU_SEI_LAST UDU_SEI_JSON
+
 static const AVOption clocks12mtc_options[] = {
     /*
     { "replace_tc", "", OFFSET(replace_tc), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
@@ -46,6 +52,9 @@ static const AVOption clocks12mtc_options[] = {
     */
     { "frame_drift", "", OFFSET(frame_drift), AV_OPT_TYPE_INT, {.i64 = 5 }, 0, 25, FLAGS },
     { "shift_ms", "", OFFSET(shift_ms), AV_OPT_TYPE_INT, {.i64 = 0 }, -10000, 10000, FLAGS },
+    { "udu_sei", "TC UDU SEI format", OFFSET(udu_sei), AV_OPT_TYPE_INT, { .i64 = UDU_SEI_NONE}, UDU_SEI_NONE, UDU_SEI_LAST, FLAGS, .unit = "udu_sei"},
+    { "none", "No timecode UDU SEI data generation", 0, AV_OPT_TYPE_CONST, {.i64 = UDU_SEI_NONE}, 0, 0, FLAGS, .unit = "udu_sei"},
+    { "json", "JSON timecode UDU SEI data format", 0, AV_OPT_TYPE_CONST, { .i64 = UDU_SEI_JSON}, 0, 0, FLAGS, .unit = "udu_sei"},
     { NULL }
 };
 
@@ -103,6 +112,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     pts_d = ((pts_cur-s->pts_last)*1000000ll)/frame->time_base.den;
     ts_us_d = ts_us-s->ts_last_us;
     ff_d = (ts_us-s->ts_start_us)/s->frame_us - s->current_frame;
+    // TODO: Split s->current_frame to a raw and an adjusted ones
     if ((pts_d > s->frame_max_us) || (pts_d <= 0) ||
         (abs(ff_d) > s->frame_drift+1) ||
         (ts_us_d > 1000000) || (ts_us_d <= 0)) {
@@ -129,14 +139,85 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     err = av_timecode_init_from_components(&tcr, s->rate, AV_TIMECODE_FLAG_24HOURSMAX, hh, mm, ss, ff, ctx);
 
     {
+        // Generate UDU SEI and according metadata for the TimeCode
+        /**
+         * "TC" - "HH:MM:SS:FF",
+         * "TC_RAW" - "HH:MM:SS:FF",
+         * "TC_TS" - "YYYY-MM-DDTHH:MM:SS.sssZ",
+         * "TS" - "YYYY-MM-DDTHH:MM:SS.sssZ",
+         */
+        char udu_tc_str[AV_TIMECODE_STR_SIZE];
+        const char * udu_tc_str_ptr = NULL;
+        char udu_tc_raw_str[AV_TIMECODE_STR_SIZE];
+        const char * udu_tc_raw_str_ptr = NULL;
+        char udu_tc_ts_str[25];
+        const char * udu_tc_ts_str_ptr = NULL;
+        char udu_ts_str[25];
+        const char * udu_ts_str_ptr = NULL;
+
         int64_t ts_ms = s->current_frame_ts_us/1000;
         time_t ts_s = ts_ms/1000;
         struct tm tm;
-        char tsstr[24]; // YYYY.mm.dd HH:MM:SS.fff
         gmtime_r(&ts_s, &tm);
-        snprintf(tsstr, sizeof(tsstr), "%04d.%02d.%02d %02d:%02d:%02d.%03d", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts_ms%1000ll));
-        if (av_dict_set(&frame->metadata, "timestamp_ms", tsstr, 0) < 0) {
-            av_log(ctx, AV_LOG_ERROR, "'timestamp_ms' metadata adding error.\n");
+
+        if (0 == err) {
+            if (NULL != (udu_tc_str_ptr = av_timecode_make_string(&tcr, udu_tc_str, 0))) {
+                if (av_dict_set(&frame->metadata, "udu_tc", udu_tc_str_ptr, 0) < 0) {
+                    av_log(ctx, AV_LOG_ERROR, "'udu_tc' metadata adding error.\n");
+                }
+            }
+        }
+        if (0 == err) {
+            // TODO: USe a raw TimeCode instead of current adjusted
+            if (NULL != (udu_tc_raw_str_ptr = av_timecode_make_string(&tcr, udu_tc_raw_str, 0))) {
+                if (av_dict_set(&frame->metadata, "udu_tc_raw", udu_tc_raw_str_ptr, 0) < 0) {
+                    av_log(ctx, AV_LOG_ERROR, "'udu_tc_raw' metadata adding error.\n");
+                }
+            }
+        }
+        if (0 == err) {
+            // TODO: Adjust TimeCode's TimeStamp to the date
+            if (0 < snprintf(udu_tc_ts_str, sizeof(udu_tc_ts_str), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts_ms%1000ll))) {
+                udu_tc_ts_str_ptr = udu_tc_ts_str;
+                if (av_dict_set(&frame->metadata, "udu_tc_ts", udu_tc_ts_str_ptr, 0) < 0) {
+                    av_log(ctx, AV_LOG_ERROR, "'udu_tc_ts' metadata adding error.\n");
+                }
+            }
+        }
+        if (0 < snprintf(udu_ts_str, sizeof(udu_ts_str), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts_ms%1000ll))) {
+            udu_ts_str_ptr = udu_ts_str;
+            if (av_dict_set(&frame->metadata, "timestamp_ms", udu_ts_str_ptr, 0) < 0) {
+                av_log(ctx, AV_LOG_ERROR, "'timestamp_ms' metadata adding error.\n");
+            }
+            if (av_dict_set(&frame->metadata, "udu_ts", udu_ts_str_ptr, 0) < 0) {
+                av_log(ctx, AV_LOG_ERROR, "'udu_ts' metadata adding error.\n");
+            }
+        }
+        if (UDU_SEI_JSON == s->udu_sei) {
+            /**
+             * {
+             *   "TC":"HH:MM:SS:FF",
+             *   "TC_RAW":"HH:MM:SS:FF",
+             *   "TC_TS":"YYYY-MM-DDTHH:MM:SS.sssZ",
+             *   "TS":"YYYY-MM-DDTHH:MM:SS.sssZ",
+             * }
+             */
+            // TODO: Update previous UDU_SEI_JSON's AV_FRAME_DATA_SEI_UNREGISTERED frame side data
+            // TODO: Use dynamic JSON builder
+            const char * template = "%s{\"TC\":\"%s\",\"TC_RAW\":\"%s\",\"TC_TS\":\"%s\",\"TS\":\"%s\"}";
+#define UDU_SEI_JSON_BUF_SIZE sizeof("XXXXXXXXXXXXXXXX{\"TC\":\"HH:MM:SS:FF\",\"TC_RAW\":\"HH:MM:SS:FF\",\"TC_TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\",\"TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\"}")
+            char buf[UDU_SEI_JSON_BUF_SIZE];
+            int sd_size;
+            if (0 < (sd_size = snprintf(buf, UDU_SEI_JSON_BUF_SIZE, template, UDU_SEI_JSON_UUID, udu_tc_str_ptr, udu_tc_raw_str_ptr, udu_tc_ts_str_ptr, udu_ts_str_ptr))) {
+                AVFrameSideData *sd = av_frame_new_side_data(frame, AV_FRAME_DATA_SEI_UNREGISTERED, sd_size);
+                if (NULL != sd) {
+                    memcpy(sd->data, buf, sd_size);
+                } else {
+                    av_log(ctx, AV_LOG_ERROR, "UDU SEI JSON timecode side data adding error.\n");
+                }
+            } else {
+                av_log(ctx, AV_LOG_ERROR, "UDU SEI JSON timecode filling error.\n");
+            }
         }
     }
 

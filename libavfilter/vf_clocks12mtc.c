@@ -8,6 +8,7 @@
 #include "internal.h"
 #include "video.h"
 #include "libavutil/rational.h"
+#include "libavutil/uuid.h"
 
 #include <time.h>
 
@@ -19,6 +20,8 @@ typedef struct ClockS12mTcContext {
     int shift_ms;
     int local_time;
     int udu_sei;
+    char * udu_sei_uuid_str;
+    char * udu_sei_uuid;
     AVRational rate;
     double d_rate;
     int64_t frame_us;
@@ -40,7 +43,6 @@ typedef struct ClockS12mTcContext {
 #define OFFSET(x) offsetof(ClockS12mTcContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 
-#define UDU_SEI_JSON_UUID "e6e576a52e1c452a"
 #define UDU_SEI_NONE 0
 #define UDU_SEI_JSON 1
 #define UDU_SEI_LAST UDU_SEI_JSON
@@ -55,6 +57,7 @@ static const AVOption clocks12mtc_options[] = {
     { "udu_sei", "TC UDU SEI format", OFFSET(udu_sei), AV_OPT_TYPE_INT, { .i64 = UDU_SEI_NONE}, UDU_SEI_NONE, UDU_SEI_LAST, FLAGS, .unit = "udu_sei"},
     { "none", "No timecode UDU SEI data generation", 0, AV_OPT_TYPE_CONST, {.i64 = UDU_SEI_NONE}, 0, 0, FLAGS, .unit = "udu_sei"},
     { "json", "JSON timecode UDU SEI data format", 0, AV_OPT_TYPE_CONST, { .i64 = UDU_SEI_JSON}, 0, 0, FLAGS, .unit = "udu_sei"},
+    { "udu_sei_uuid", "SEI UUID for the data" , OFFSET(udu_sei_uuid_str),  AV_OPT_TYPE_STRING, { .str = NULL}, 0, 0, FLAGS },
     { NULL }
 };
 
@@ -62,11 +65,33 @@ AVFILTER_DEFINE_CLASS(clocks12mtc);
 
 static av_cold int init(AVFilterContext *ctx)
 {
-    /*
     ClockS12mTcContext *s = ctx->priv;
-    */
+
+    if (UDU_SEI_NONE != s->udu_sei) {
+        if (NULL == s->udu_sei_uuid_str) {
+            av_log(ctx, AV_LOG_ERROR, "SEI UUID wasn't set.\n");
+            return AVERROR(EINVAL);
+        } else {
+            AVUUID uuid;
+            if (0 == av_uuid_parse(s->udu_sei_uuid_str, uuid)) {
+                s->udu_sei_uuid = av_memdup(uuid, AV_UUID_LEN);
+            } else {
+                av_log(ctx, AV_LOG_ERROR, "SEI UUID \"%s\" wasn't parsed.\n", s->udu_sei_uuid_str);
+                return AVERROR(EINVAL);
+            }
+        }
+    }
 
     return 0;
+}
+
+static av_cold void uninit(AVFilterContext *ctx)
+{
+    ClockS12mTcContext *s = ctx->priv;
+
+    if (NULL != s->udu_sei_uuid) {
+        av_freep(&s->udu_sei_uuid);
+    }
 }
 
 static int config_props(AVFilterLink *inlink)
@@ -204,12 +229,15 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
              */
             // TODO: Update previous UDU_SEI_JSON's AV_FRAME_DATA_SEI_UNREGISTERED frame side data
             // TODO: Use dynamic JSON builder
-            const char * template = "%s{\"TC\":\"%s\",\"TC_RAW\":\"%s\",\"TC_TS\":\"%s\",\"TS\":\"%s\"}";
-#define UDU_SEI_JSON_BUF_SIZE sizeof("XXXXXXXXXXXXXXXX{\"TC\":\"HH:MM:SS:FF\",\"TC_RAW\":\"HH:MM:SS:FF\",\"TC_TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\",\"TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\"}")
-            char buf[UDU_SEI_JSON_BUF_SIZE];
+            const char * template = "{\"TC\":\"%s\",\"TC_RAW\":\"%s\",\"TC_TS\":\"%s\",\"TS\":\"%s\"}";
+#define UDU_SEI_JSON_BUF_SIZE sizeof("{\"TC\":\"HH:MM:SS:FF\",\"TC_RAW\":\"HH:MM:SS:FF\",\"TC_TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\",\"TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\"}")
+            char buf[AV_UUID_LEN + UDU_SEI_JSON_BUF_SIZE];
             int sd_size;
-            if (0 < (sd_size = snprintf(buf, UDU_SEI_JSON_BUF_SIZE, template, UDU_SEI_JSON_UUID, udu_tc_str_ptr, udu_tc_raw_str_ptr, udu_tc_ts_str_ptr, udu_ts_str_ptr))) {
-                AVFrameSideData *sd = av_frame_new_side_data(frame, AV_FRAME_DATA_SEI_UNREGISTERED, sd_size);
+            memcpy(buf, s->udu_sei_uuid, AV_UUID_LEN);
+            if (0 < (sd_size = snprintf(buf+AV_UUID_LEN, UDU_SEI_JSON_BUF_SIZE, template, udu_tc_str_ptr, udu_tc_raw_str_ptr, udu_tc_ts_str_ptr, udu_ts_str_ptr))) {
+                AVFrameSideData *sd = NULL;
+                sd_size+=AV_UUID_LEN;
+                sd = av_frame_new_side_data(frame, AV_FRAME_DATA_SEI_UNREGISTERED, sd_size);
                 if (NULL != sd) {
                     memcpy(sd->data, buf, sd_size);
                 } else {
@@ -273,4 +301,5 @@ const AVFilter ff_vf_clocks12mtc = {
     FILTER_INPUTS(inputs),
     FILTER_OUTPUTS(ff_video_default_filterpad),
     .init          = init,
+    .uninit        = uninit,
 };

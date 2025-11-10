@@ -33,7 +33,8 @@ typedef struct ClockS12mTcContext {
     int64_t pts_start;
     int64_t pts_last;
     int64_t current_frame_ts_us;
-    int current_frame;
+    int current_frame_raw;
+    int current_frame_diff;
     int day_frames;
 
     char tcbuf[AV_TIMECODE_STR_SIZE];
@@ -107,6 +108,7 @@ static int config_props(AVFilterLink *inlink)
     s->frame_min_us = s->frame_us*2/3;
     s->day_frames = (int)(60.0*60.0*24.0*s->d_rate);
     s->ts_last_us = LLONG_MAX;
+    s->current_frame_raw = INT_MAX;
 
     av_log(ctx, AV_LOG_DEBUG, "frame_rate: %f replace_tc:%d local_time:%d shift_ms:%d\n",
             av_q2d(s->rate), s->replace_tc, s->local_time, s->shift_ms);
@@ -119,7 +121,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     AVFilterLink *outlink = ctx->outputs[0];
     ClockS12mTcContext *s = ctx->priv;
 
-    AVTimecode tcr;
+    AVTimecode tcr, tcr_raw;
     int hh, mm, ss, ff;
     int err;
     int64_t pts_d, ts_us_d, ff_d;
@@ -134,34 +136,39 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         dtime_cur_s = tm.tm_hour*3600 + tm.tm_min*60 + tm.tm_sec;
         dtime_cur_us = (dtime_cur_s*1000000ll) + (ts_us%1000000ll);
     }
+    if (INT_MAX == s->current_frame_raw) {
+        s->current_frame_raw = dtime_cur_us/s->frame_us;
+    }
     pts_d = ((pts_cur-s->pts_last)*1000000ll)/frame->time_base.den;
     ts_us_d = ts_us-s->ts_last_us;
-    ff_d = (ts_us-s->ts_start_us)/s->frame_us - s->current_frame;
-    // TODO: Split s->current_frame to a raw and an adjusted ones
+    ff_d = (ts_us-s->ts_start_us)/s->frame_us - (s->current_frame_raw + s->current_frame_diff);
     if ((pts_d > s->frame_max_us) || (pts_d <= 0) ||
         (abs(ff_d) > s->frame_drift+1) ||
         (ts_us_d > 1000000) || (ts_us_d <= 0)) {
         s->ts_start_us = ts_us-dtime_cur_us;
         s->pts_start = pts_cur;
         s->dtime_start_s = 0;
-        s->current_frame = dtime_cur_us/s->frame_us;
+        s->current_frame_diff = (dtime_cur_us/s->frame_us) - s->current_frame_raw;
         s->current_frame_ts_us = ts_us;
         av_log(ctx, AV_LOG_INFO, "Reinit TC due to PTS(%" PRId64 ")/time(%" PRId64 ")/FF(%" PRId64 ") differencies inconsistency.\n", pts_d, ts_us_d, ff_d);
     } else {
-        s->current_frame += 1;
+        s->current_frame_raw += 1;
         s->current_frame_ts_us += pts_d;
     }
     s->pts_last = pts_cur;
     s->ts_last_us = ts_us;
 
     ss = s->dtime_start_s;
-    ff = s->current_frame;
+    ff = s->current_frame_raw + s->current_frame_diff;
     hh = ss/3600;
     ss = ss-(hh*3600);
     mm = ss/60;
     ss = ss-(mm*60);
 
     err = av_timecode_init_from_components(&tcr, s->rate, AV_TIMECODE_FLAG_24HOURSMAX, hh, mm, ss, ff, ctx);
+    if (0 == err) {
+        err = av_timecode_init_from_components(&tcr_raw, s->rate, AV_TIMECODE_FLAG_24HOURSMAX, hh, mm, ss, s->current_frame_raw, ctx);
+    }
 
     {
         // Generate UDU SEI and according metadata for the TimeCode
@@ -193,8 +200,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             }
         }
         if (0 == err) {
-            // TODO: USe a raw TimeCode instead of current adjusted
-            if (NULL != (udu_tc_raw_str_ptr = av_timecode_make_string(&tcr, udu_tc_raw_str, 0))) {
+            if (NULL != (udu_tc_raw_str_ptr = av_timecode_make_string(&tcr_raw, udu_tc_raw_str, 0))) {
                 if (av_dict_set(&frame->metadata, "udu_tc_raw", udu_tc_raw_str_ptr, 0) < 0) {
                     av_log(ctx, AV_LOG_ERROR, "'udu_tc_raw' metadata adding error.\n");
                 }

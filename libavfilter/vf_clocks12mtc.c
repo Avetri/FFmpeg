@@ -136,7 +136,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         dtime_cur_s = tm.tm_hour*3600 + tm.tm_min*60 + tm.tm_sec;
         dtime_cur_us = (dtime_cur_s*1000000ll) + (ts_us%1000000ll);
     }
-    if (INT_MAX == s->current_frame_raw) {
+    if (INT_MAX != s->current_frame_raw) {
+        s->current_frame_raw += 1;
+    } else {
         s->current_frame_raw = dtime_cur_us/s->frame_us;
     }
     pts_d = ((pts_cur-s->pts_last)*1000000ll)/frame->time_base.den;
@@ -152,7 +154,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         s->current_frame_ts_us = ts_us;
         av_log(ctx, AV_LOG_INFO, "Reinit TC due to PTS(%" PRId64 ")/time(%" PRId64 ")/FF(%" PRId64 ") differencies inconsistency.\n", pts_d, ts_us_d, ff_d);
     } else {
-        s->current_frame_raw += 1;
         s->current_frame_ts_us += pts_d;
     }
     s->pts_last = pts_cur;

@@ -126,7 +126,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     int err;
     int64_t pts_d, ts_us_d, ff_d;
     int64_t pts_cur = av_rescale_q(frame->pts, inlink->time_base, frame->time_base);
-    int64_t ts_us = av_gettime()-(s->shift_ms*1000ll);
+    int64_t ts_us_raw = av_gettime();
+    int64_t ts_us = ts_us_raw-(s->shift_ms*1000ll);
     time_t ts_s = (time_t)ts_us/1000000ll;
     int32_t dtime_cur_s;
     int64_t dtime_cur_us;
@@ -188,10 +189,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         char udu_ts_str[25];
         const char * udu_ts_str_ptr = NULL;
 
-        int64_t ts_ms = s->current_frame_ts_us/1000;
-        time_t ts_s = ts_ms/1000;
-        struct tm tm;
-        gmtime_r(&ts_s, &tm);
+        int64_t ts_ms_raw = ts_us_raw/1000;
+        time_t ts_s_raw = ts_ms_raw/1000;
+        struct tm tm_raw;
+        gmtime_r(&ts_s_raw, &tm_raw);
 
         if (0 == err) {
             if (NULL != (udu_tc_str_ptr = av_timecode_make_string(&tcr, udu_tc_str, 0))) {
@@ -208,7 +209,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             }
         }
         if (0 == err) {
-            // TODO: Adjust TimeCode's TimeStamp to the date
+            // TODO: Round TimeCode's TimeStamp to the frame
+            int64_t ts_ms = s->current_frame_ts_us/1000;
+            time_t ts_s = ts_ms/1000;
+            struct tm tm;
+            gmtime_r(&ts_s, &tm);
             if (0 < snprintf(udu_tc_ts_str, sizeof(udu_tc_ts_str), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts_ms%1000ll))) {
                 udu_tc_ts_str_ptr = udu_tc_ts_str;
                 if (av_dict_set(&frame->metadata, "udu_tc_ts", udu_tc_ts_str_ptr, 0) < 0) {
@@ -216,7 +221,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                 }
             }
         }
-        if (0 < snprintf(udu_ts_str, sizeof(udu_ts_str), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ts_ms%1000ll))) {
+        if (0 < snprintf(udu_ts_str, sizeof(udu_ts_str), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm_raw.tm_year+1900, tm_raw.tm_mon+1, tm_raw.tm_mday, tm_raw.tm_hour, tm_raw.tm_min, tm_raw.tm_sec, (int)(ts_ms_raw%1000ll))) {
             udu_ts_str_ptr = udu_ts_str;
             if (av_dict_set(&frame->metadata, "timestamp_ms", udu_ts_str_ptr, 0) < 0) {
                 av_log(ctx, AV_LOG_ERROR, "'timestamp_ms' metadata adding error.\n");

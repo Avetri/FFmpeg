@@ -211,12 +211,34 @@ int av_timecode_init_from_string(AVTimecode *tc, AVRational rate, const char *st
 int av_timecode_check_frame_rate(AVRational rate);
 
 /**
+ * Increment timecode by num frames
+ *
+ * @param tc      pointer to an allocated AVTimecode
+ * @param num     number of frames to add
+ *
+ * @return        0 on success, AVERROR otherwise
+ */
+int av_timecode_inc(AVTimecode *tc, int num);
+
+/**
+ * Calculate frame difference between two equal rate timecodes
+ *
+ * @param first   pointer to first allocated AVTimecode
+ * @param second  pointer to second allocated AVTimecode
+ * @param diff    pointer to int for calulation result
+ *
+ * @return        0 on success, AVERROR otherwise
+ */
+int av_timecode_frame_diff(AVTimecode *first, AVTimecode *second, int *diff, void *log_ctx);
+
+/**
  * Extract timecode components from a timecode struct.
  *
  * @param tc          timecode data correctly initialized
  * @param rate        a ponter to frame rate in rational form
  * @param flags       a pointer to miscellaneous flags such as drop frame, +24 hours, ...
  *                    (see AVTimecodeFlag)
+ * @param neg         a pointer to negative value indicator
  * @param hh          a pointer to hours
  * @param mm          a pointer to minutes
  * @param ss          a pointer to seconds
@@ -225,6 +247,6 @@ int av_timecode_check_frame_rate(AVRational rate);
  *                    is a pointer to an AVClass struct (used for av_log)
  * @return            0 on success, AVERROR otherwise
  */
-int av_timecode_extract_components(const AVTimecode *tc, AVRational *rate, int *flags, int *hh, int *mm, int *ss, int *ff, void *log_ctx);
+int av_timecode_extract_components(const AVTimecode *tc, AVRational *rate, int *flags, int *neg, int *hh, int *mm, int *ss, int *ff, void *log_ctx);
 
 #endif /* AVUTIL_TIMECODE_H */

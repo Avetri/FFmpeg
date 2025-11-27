@@ -293,20 +293,81 @@ int av_timecode_init_from_string(AVTimecode *tc, AVRational rate, const char *st
     return av_timecode_init_from_components(tc, rate, flags, hh, mm, ss, ff, log_ctx);
 }
 
-int av_timecode_extract_components(const AVTimecode *tc, AVRational *rate, int *flags, int *hh, int *mm, int *ss, int *ff, void *log_ctx)
+int av_timecode_extract_components(const AVTimecode *tc, AVRational *rate, int *flags, int *neg, int *hh, int *mm, int *ss, int *ff, void *log_ctx)
 {
     int ret;
+    int drop = tc->flags & AV_TIMECODE_FLAG_DROPFRAME;
+    int fn = tc->start;
 
     ret = check_timecode(log_ctx, tc);
     if (ret < 0)
         return ret;
 
+    *neg = 0;
+    if (drop)
+        fn = av_timecode_adjust_ntsc_framenum2(fn, tc->fps);
+    if (fn < 0) {
+        fn = abs(fn);
+        *neg = tc->flags & AV_TIMECODE_FLAG_ALLOWNEGATIVE;
+    }
+
     *flags = tc->flags;
     *rate = tc->rate;
-    *ff = tc->start%tc->fps;
-    *ss = (tc->start/tc->fps)%60;
-    *mm = (tc->start/tc->fps/60)%60;
-    *hh = (tc->start/tc->fps/3600);
+    *ff = fn%tc->fps;
+    *ss = (fn/tc->fps)%60;
+    *mm = (fn/tc->fps/60)%60;
+    *hh = (fn/tc->fps/3600);
+
+    if (tc->flags & AV_TIMECODE_FLAG_24HOURSMAX)
+        *hh = *hh % 24;
+
+    return 0;
+}
+
+int av_timecode_inc(AVTimecode *tc, int num)
+{
+    tc->start += num;
+    if (tc->flags&AV_TIMECODE_FLAG_24HOURSMAX) {
+        tc->start %= 24*3600*tc->fps;
+    }
+
+    return 0;
+}
+
+int av_timecode_frame_diff(AVTimecode *first, AVTimecode *second, int *diff, void *log_ctx)
+{
+    int ret;
+    int res;
+
+    ret = check_timecode(log_ctx, first);
+    if (ret < 0)
+        return ret;
+
+    ret = check_timecode(log_ctx, second);
+    if (ret < 0)
+        return ret;
+
+    if (0 != av_cmp_q(first->rate, second->rate)) {
+        av_log(log_ctx, AV_LOG_ERROR, "Rates aren't equal\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (first->flags != second->flags) {
+        av_log(log_ctx, AV_LOG_ERROR, "Flags aren't equal\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (first->flags & AV_TIMECODE_FLAG_24HOURSMAX) {
+        res = second->start%(24*3600*second->fps);
+        if (second->start < first->start) {
+            res += (24*3600*second->fps);
+        }
+        res = res - (first->start%(24*3600*second->fps));
+    } else {
+        res = second->start - first->start;
+    }
+
+    *diff = res;
 
     return 0;
 }

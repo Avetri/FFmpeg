@@ -969,6 +969,8 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     // Handle Video Frame
     if (videoFrame) {
         AVPacket pkt = { 0 };
+        AVTimecode tc_raw = { 0 };
+        AVTimecode tcr = { 0 };
         if (ctx->frameCount % 25 == 0) {
             unsigned long long qsize = ff_decklink_packet_queue_size(&ctx->queue);
             av_log(avctx, AV_LOG_DEBUG,
@@ -1029,38 +1031,171 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
             // Handle Timecode (if requested)
             if (ctx->tc_format) {
-                AVTimecode tcr;
-                // TODO: [decklink] Add timezone correction control: automatic shift TC to UTC if minutes and seconds are close to real time
-                // TODO: [decklink] Add TC emergency ignoration: produce no TC if time is unproportionally shifted
-                // TODO: [decklink] Produce artificial TC on a gap
-                if (get_frame_timecode(avctx, ctx, &tcr, videoFrame) >= 0) {
-                    char tcstr[AV_TIMECODE_STR_SIZE];
-                    char tcmsstr[AV_TIMECODE_STR_SIZE];
-                    const char *tc = NULL;
-                    const char *tc_ms = NULL;
-                    int64_t ts_us;
-                    time_t ts_s;
-                    int ts_s_mstail;
-                    struct tm tm;
-                    AVRational rate;
-                    int flags, hh, mm, ss, ff;
+                if (get_frame_timecode(avctx, ctx, &tc_raw, videoFrame) >= 0) {
+                    if (ctx->no_timecode) {
+                        av_log(avctx, AV_LOG_WARNING, "Frame received (#%lu) - Found timecode "
+                        "- TC dropped %u\n", ctx->frameCount, ctx->no_tc_cnt);
+                    }
+                    ctx->no_timecode = 0;
 
                     if (cctx->tc_handle) {
+                        tc_raw.flags |= AV_TIMECODE_FLAG_24HOURSMAX;
+                    } else {
+                        tcr = tc_raw;
+                    }
+                } else {
+                    ctx->no_tc_cnt++;
+                    if (!ctx->no_timecode) {
+                        av_log(avctx, AV_LOG_WARNING, "Frame received (#%lu) - Unable to find timecode "
+                        "- TC dropped %u\n", ctx->frameCount, ctx->no_tc_cnt);
+                    }
+                    ctx->no_timecode = 1;
+                }
+            }
+        }
+
+        if (ctx->tc_format) {
+            char tcstr[AV_TIMECODE_STR_SIZE];
+            char tcmsstr[AV_TIMECODE_STR_SIZE];
+            const char *tc = NULL;
+            const char *tc_ms = NULL;
+            int64_t ts_us;
+            time_t ts_s;
+            int ts_s_mstail;
+            struct tm tm;
+            AVTimecode tc_ts = { 0 };
+
+            // Get current real time
+            ts_us = av_gettime();
+            ts_s = (time_t)ts_us/1000000ll;
+            ts_s_mstail = (ts_us%1000000ll)/1000;
+            gmtime_r(&ts_s, &tm);
+
+            if (cctx->tc_handle) {
+                AVRational rate_c = ctx->video_st->r_frame_rate;
+                int ff_c = (ts_s_mstail * rate_c.num)/rate_c.den/1000;
+                av_timecode_init_from_components(&tc_ts, rate_c, AV_TIMECODE_FLAG_24HOURSMAX, tm.tm_hour, tm.tm_min, tm.tm_sec, ff_c, avctx);
+            }
+
+            // Handle raw TC checking
+            if (cctx->tc_handle && 0 < tc_raw.fps) {
+                tc_raw.flags |= AV_TIMECODE_FLAG_24HOURSMAX;
+                int diff;
+                if (0 == av_timecode_frame_diff(&tc_raw, &tc_ts, &diff, avctx)) {
+                    if (tc_raw.fps < abs((int)(diff%(3600*tc_raw.fps)))) {
+                        // Check aligment
+                        if (!ctx->no_tc_align) {
+                            char tc_raw_str[AV_TIMECODE_STR_SIZE];
+                            char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_raw, tc_raw_str, 0);
+                            av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "TC isn't aligned with current time, TC - %s, TS TC - %s\n", tc_raw_str, tc_ts_str);
+                        }
+                        tcr = { 0 };
+                        ctx->no_tc_align = 1;
+                    } else if(tc_raw.fps < abs(diff)) {
+                        // Check TZ for UTC
+                        tcr = tc_raw;
+                        av_timecode_inc(&tcr, round(av_q2d({.num=diff, .den=3600*(int)tc_raw.fps}))*3600*(int)tc_raw.fps);
+                        if (!ctx->no_tc_utc) {
+                            char tc_raw_str[AV_TIMECODE_STR_SIZE];
+                            char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                            char tc_res_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_raw, tc_raw_str, 0);
+                            av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                            av_timecode_make_string(&tcr, tc_res_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "TC isn't UTC one, TC - %s, TS TC - %s, res. TC - %s\n", tc_raw_str, tc_ts_str, tc_res_str);
+                        }
+                        if (ctx->no_tc_align) {
+                            av_log(avctx, AV_LOG_WARNING, "TC is aligned with current time again\n");
+                        }
+                        ctx->no_tc_align = 0;
+                        ctx->no_tc_utc = 1;
+                    } else {
+                        if (ctx->no_tc_align) {
+                            av_log(avctx, AV_LOG_WARNING, "TC is aligned with current time again\n");
+                        }
+                        ctx->no_tc_align = 0;
+                        if (ctx->no_tc_utc) {
+                            av_log(avctx, AV_LOG_WARNING, "TC is UTC again\n");
+                        }
+                        ctx->no_tc_utc = 0;
+                        tcr = tc_raw;
+                    }
+                } else {
+                    if (!ctx->tc_err) {
+                        av_log(avctx, AV_LOG_ERROR, "TC handle error: Can't compare current TC with a timestamp's one\n");
+                    }
+                    tcr = { 0 };
+                    ctx->tc_err = 1;
+                }
+                if (0 >= ctx->tc_last_raw.fps) {
+                    char tc_raw_str[AV_TIMECODE_STR_SIZE];
+                    char tc_res_str[AV_TIMECODE_STR_SIZE];
+                    av_timecode_make_string(&tc_raw, tc_raw_str, 0);
+                    av_timecode_make_string(&tcr, tc_res_str, 0);
+                    av_log(avctx, AV_LOG_INFO, "Found the first TC - %s, res. TC - %s\n", tc_raw_str, tc_res_str);
+                }
+                else if (0 < ctx->tc_last_raw.fps) {
+                    // Check TC consistency
+                    if (0 != av_cmp_q(tc_raw.rate, ctx->tc_last_raw.rate)) {
+                        // Video rate changing
+                        av_log(avctx, AV_LOG_WARNING, "Video rate was changed from %d/%d to %d/%d\n", ctx->tc_last.rate.num, ctx->tc_last.rate.den, tc_raw.rate.num, tc_raw.rate.den);
+                        // tcr = tc_raw;
+                    } else if (0 == av_timecode_frame_diff(&ctx->tc_last_raw, &tc_raw, &diff, avctx)) {
+                        // Raw TCs gap measurement
+                        if (1 != diff) {
+                            char tc_raw_str[AV_TIMECODE_STR_SIZE];
+                            char tc_last_raw_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_raw, tc_raw_str, 0);
+                            av_timecode_make_string(&ctx->tc_last_raw, tc_last_raw_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "A gap between raw TC - %d frames, TC - %s, last TC - %s\n", diff, tc_raw_str, tc_last_raw_str);
+                        }
+                        // tcr = tc_raw;
+                    } else {
+                        if (!ctx->tc_err) {
+                            av_log(avctx, AV_LOG_ERROR, "TC handle error: Can't compare current TC with a previous one\n");
+                        }
+                        tcr = { 0 };
+                        ctx->tc_err = 1;
+                    }
+                }
+                ctx->tc_last_raw = tc_raw;
+            }
+
+            // Handle TC gaps
+            if (cctx->tc_handle) {
+                if (0 >= tcr.fps ) {
+                    // On TC absence
+                    if (0 < ctx->tc_last.fps ) {
+                        // Increment previous one
+                        tcr = ctx->tc_last;
                         tcr.flags |= AV_TIMECODE_FLAG_24HOURSMAX;
+                        av_timecode_inc(&tcr, 1);
+                    } else if (0 >= ctx->tc_last.fps) {
+                        // Create new one
+                        char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                        av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                        av_log(avctx, AV_LOG_WARNING, "Use TS TC - %s as the first TC\n", tc_ts_str);
+                        tcr = tc_ts;
                     }
-
-                    // Get current real time and align to the TC
-                    ts_us = av_gettime();
-                    ts_s = (time_t)ts_us/1000000ll;
-                    ts_s_mstail = (ts_us%1000000ll)/1000;
-                    gmtime_r(&ts_s, &tm);
-                    if (cctx->tc_handle && 0 == av_timecode_extract_components(&tcr, &rate, &flags, &hh, &mm, &ss, &ff, ctx)) {
-                        tm.tm_hour = hh%24;
-                        tm.tm_min = mm;
-                        tm.tm_sec = ss;
-                        ts_s_mstail = (ff*rate.den*1000)/rate.num;
+                } else if (0 >= ctx->tc_last.fps) {
+                } else if (0 < ctx->tc_last.fps) {
+                    int diff;
+                    if (0 == av_timecode_frame_diff(&ctx->tc_last, &tcr, &diff, avctx)) {
+                        // Resulting TCs gap measurement
+                        if (1 != diff) {
+                            char tcr_str[AV_TIMECODE_STR_SIZE];
+                            char tc_last_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tcr, tcr_str, 0);
+                            av_timecode_make_string(&ctx->tc_last, tc_last_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "A gap between resulting TC - %d frames, TC - %s, last TC - %s\n", diff, tcr_str, tc_last_str);
+                        }
                     }
+                }
+            }
 
+            if (0 < tcr.fps) {
                     tc = av_timecode_make_string(&tcr, tcstr, 0);
                     tc_ms = av_timecode_make_string_ms(&tcr, tcmsstr, 0);
                     if (tc) {
@@ -1107,9 +1242,8 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                             }
                         }
                     }
-                } else {
-                    av_log(avctx, AV_LOG_DEBUG, "Unable to find timecode.\n");
-                }
+
+                ctx->tc_last = tcr;
             }
         }
 

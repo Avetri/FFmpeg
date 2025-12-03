@@ -32,6 +32,8 @@
 #include "log.h"
 #include "error.h"
 
+static int check_timecode(void *log_ctx, AVTimecode *tc);
+
 int av_timecode_adjust_ntsc_framenum2(int framenum, int fps)
 {
     /* only works for multiples of NTSC 29.97 */
@@ -107,6 +109,9 @@ char *av_timecode_make_string(const AVTimecode *tc, char *buf, int framenum_arg)
     int hh, mm, ss, ff, ff_len, neg = 0;
     int64_t framenum = framenum_arg;
 
+    if (check_timecode(NULL, tc) < 0)
+        return NULL;
+
     framenum += tc->start;
     if (drop)
         framenum = av_timecode_adjust_ntsc_framenum2(framenum, fps);
@@ -134,6 +139,9 @@ char *av_timecode_make_string_ms(const AVTimecode *tc, char *buf, int framenum_a
     int hh, mm, ss, ff, neg = 0;
     int ff_ms;
     int64_t framenum = framenum_arg;
+
+    if (check_timecode(NULL, tc) < 0)
+        return NULL;
 
     framenum += tc->start;
     if (drop)

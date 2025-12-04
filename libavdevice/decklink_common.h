@@ -156,6 +156,7 @@ struct decklink_ctx {
     int tc_err;
     AVTimecode tc_last;
     AVTimecode tc_last_raw;
+    int r_frame_dur_ms;
 
     /* Options */
     int list_devices;

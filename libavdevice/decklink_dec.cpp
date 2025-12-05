@@ -106,6 +106,8 @@ static VANCLineNumber vanc_line_numbers[] = {
     {bmdModeUnknown, 0, -1, -1, -1}
 };
 
+static AVTimecode tc_zero;
+
 #if BLACKMAGIC_DECKLINK_API_VERSION <= 0x0e020000
 class decklink_allocator : public IDeckLinkMemoryAllocator
 {
@@ -1079,7 +1081,30 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
             if (cctx->tc_handle && 0 < tc_raw.fps) {
                 tc_raw.flags |= AV_TIMECODE_FLAG_24HOURSMAX;
                 int diff;
-                if (0 == av_timecode_frame_diff(&tc_raw, &tc_ts, &diff, avctx)) {
+                if (0 == av_timecode_frame_diff(&tc_raw, &tc_zero, &diff, avctx)) {
+                    if (0 != diff) {
+                        if (ctx->tc_zeros) {
+                            av_log(avctx, AV_LOG_WARNING, "TCs aren't zeros again\n");
+                            ctx->tc_zeros = 0;
+                        }
+                    } else {
+                        if (!ctx->tc_zeros && 0 >= ctx->tc_last_raw.fps) {
+                            char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "The first TCs is zero, use TS TC - %s as a substitute\n", tc_ts_str);
+                            ctx->tc_zeros = 1;
+                            tcr = tc_ts;
+                        } else if (!ctx->tc_zeros && 0 == av_timecode_frame_diff(&ctx->tc_last_raw, &tc_raw, &diff, avctx) && 1 != diff) {
+                            char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "TCs dropped to zero, use TS TC - %s as a substitute\n", tc_ts_str);
+                            ctx->tc_zeros = 1;
+                            tcr = tc_ts;
+                        }
+                    }
+                }
+                if (ctx->tc_zeros) {
+                } else if (0 == av_timecode_frame_diff(&tc_raw, &tc_ts, &diff, avctx)) {
                     if (tc_raw.fps < abs((int)(diff%(3600*tc_raw.fps)))) {
                         // Check aligment
                         if (!ctx->no_tc_align) {
@@ -1127,14 +1152,14 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                     tcr = { 0 };
                     ctx->tc_err = 1;
                 }
-                if (0 >= ctx->tc_last_raw.fps) {
+                if (!ctx->tc_zeros && 0 >= ctx->tc_last_raw.fps) {
                     char tc_raw_str[AV_TIMECODE_STR_SIZE];
                     char tc_res_str[AV_TIMECODE_STR_SIZE];
                     av_timecode_make_string(&tc_raw, tc_raw_str, 0);
                     av_timecode_make_string(&tcr, tc_res_str, 0);
                     av_log(avctx, AV_LOG_INFO, "Found the first TC - %s, res. TC - %s\n", tc_raw_str, tc_res_str);
                 }
-                else if (0 < ctx->tc_last_raw.fps) {
+                else if (!ctx->tc_zeros && 0 < ctx->tc_last_raw.fps) {
                     // Check TC consistency
                     if (0 != av_cmp_q(tc_raw.rate, ctx->tc_last_raw.rate)) {
                         // Video rate changing
@@ -1767,6 +1792,8 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
     st->time_base.num      = ctx->bmd_tb_num;
     st->r_frame_rate       = av_make_q(st->time_base.den, st->time_base.num);
     ctx->r_frame_dur_ms    = (1000*st->time_base.num)/st->time_base.den;
+
+    av_timecode_init_from_components(&tc_zero, st->r_frame_rate, AV_TIMECODE_FLAG_24HOURSMAX, 00, 00, 00, 00, avctx);
 
     switch(ctx->raw_format) {
     case bmdFormat8BitYUV:

@@ -154,6 +154,8 @@ struct decklink_ctx {
     int no_tc_utc;
     // TC handling error
     int tc_err;
+    // TCs are zeros
+    int tc_zeros;
     AVTimecode tc_last;
     AVTimecode tc_last_raw;
     int r_frame_dur_ms;

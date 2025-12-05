@@ -47,6 +47,7 @@ extern "C" {
 #include "libavutil/timecode.h"
 #include "libavutil/mathematics.h"
 #include "libavutil/reverse.h"
+#include "libavutil/uuid.h"
 #include "avdevice.h"
 #if CONFIG_LIBZVBI
 #include <libzvbi.h>
@@ -927,6 +928,10 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     int64_t wallclock = 0, abs_wallclock = 0;
     struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
     bool signalLocked = false;
+    int64_t ts_us;
+
+    // Get current real time
+    ts_us = av_gettime();
 
     if (S_OK != ctx->dls->GetFlag(bmdDeckLinkStatusVideoInputSignalLocked, &signalLocked)) {
         av_log(avctx, AV_LOG_ERROR, "Can't get video input signal lock status\n");
@@ -1055,14 +1060,11 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         }
 
         if (ctx->tc_format) {
-            int64_t ts_us;
             time_t ts_s;
             int ts_s_mstail;
             struct tm tm;
             AVTimecode tc_ts = { 0 };
 
-            // Get current real time
-            ts_us = av_gettime();
             ts_s = (time_t)ts_us/1000000ll;
             ts_s_mstail = (ts_us%1000000ll)/1000;
             gmtime_r(&ts_s, &tm);
@@ -1302,6 +1304,35 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                     }
                 }
 #pragma GCC diagnostic pop
+
+                if (UDU_SEI_JSON == cctx->udu_sei) {
+                    /**
+                     * {
+                     *   "TC":"HH:MM:SS:FF",
+                     *   "TC_RAW":"HH:MM:SS:FF",
+                     *   "TC_TS":"YYYY-MM-DDTHH:MM:SS.sssZ",
+                     *   "TS":"YYYY-MM-DDTHH:MM:SS.sssZ",
+                     * }
+                     */
+                    // TODO: Use dynamic JSON builder
+                    const char * mask = "{\"TC\":\"%s\",\"TC_RAW\":\"%s\",\"TC_TS\":\"%s\",\"TS\":\"%s\"}";
+#define UDU_SEI_JSON_BUF_SIZE sizeof("{\"TC\":\"HH:MM:SS:FF\",\"TC_RAW\":\"HH:MM:SS:FF\",\"TC_TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\",\"TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\"}")
+                    char buf[AV_UUID_LEN + UDU_SEI_JSON_BUF_SIZE];
+                    int sd_size;
+                    memcpy(buf, cctx->udu_sei_uuid, AV_UUID_LEN);
+                    if (0 < (sd_size = snprintf(buf+AV_UUID_LEN, UDU_SEI_JSON_BUF_SIZE, mask, udu_tc_str_ptr, udu_tc_raw_str_ptr, udu_tc_ts_str_ptr, udu_ts_str_ptr))) {
+                        uint8_t *sd = NULL;
+                        sd_size+=AV_UUID_LEN;
+                        sd = av_packet_new_side_data(&pkt, AV_PKT_DATA_SEI_UNREGISTERED, sd_size);
+                        if (NULL != sd) {
+                            memcpy(sd, buf, sd_size);
+                        } else {
+                            av_log(ctx, AV_LOG_ERROR, "UDU SEI JSON timecode side data adding error.\n");
+                        }
+                    } else {
+                        av_log(ctx, AV_LOG_ERROR, "UDU SEI JSON timecode filling error.\n");
+                    }
+                }
 
 
                 if (NULL != metadata_dict) {
@@ -1544,6 +1575,10 @@ av_cold int ff_decklink_read_close(AVFormatContext *avctx)
     ff_decklink_cleanup(avctx);
     ff_decklink_packet_queue_end(&ctx->queue);
 
+    if (NULL != cctx->udu_sei_uuid) {
+        av_freep(&cctx->udu_sei_uuid);
+    }
+
     av_freep(&cctx->ctx);
 
     return 0;
@@ -1585,6 +1620,21 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
     if (cctx->raw_format > 0 && (unsigned int)cctx->raw_format < FF_ARRAY_ELEMS(decklink_raw_format_map))
         ctx->raw_format = decklink_raw_format_map[cctx->raw_format];
     cctx->ctx = ctx;
+
+    if (UDU_SEI_NONE != cctx->udu_sei) {
+        if (NULL == cctx->udu_sei_uuid_str) {
+            av_log(ctx, AV_LOG_ERROR, "SEI UUID wasn't set.\n");
+            return AVERROR(EINVAL);
+        } else {
+            AVUUID uuid;
+            if (0 == av_uuid_parse(cctx->udu_sei_uuid_str, uuid)) {
+                cctx->udu_sei_uuid = (char *)av_memdup(uuid, AV_UUID_LEN);
+            } else {
+                av_log(ctx, AV_LOG_ERROR, "SEI UUID \"%s\" wasn't parsed.\n", cctx->udu_sei_uuid_str);
+                return AVERROR(EINVAL);
+            }
+        }
+    }
 
     /* Check audio channel option for valid values: 2, 8 or 16 */
     switch (cctx->audio_channels) {

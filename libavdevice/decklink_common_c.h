@@ -37,6 +37,10 @@ typedef enum DecklinkPtsSource {
     PTS_SRC_NB
 } DecklinkPtsSource;
 
+#define UDU_SEI_NONE 0
+#define UDU_SEI_JSON 1
+#define UDU_SEI_LAST UDU_SEI_JSON
+
 struct decklink_cctx {
     const AVClass *cclass;
 
@@ -60,6 +64,9 @@ struct decklink_cctx {
     int video_input;
     int tc_format;
     int tc_handle;
+    int udu_sei;
+    char * udu_sei_uuid_str;
+    char * udu_sei_uuid;
     int draw_bars;
     char *format_code;
     int raw_format;

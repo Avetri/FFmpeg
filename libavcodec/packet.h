@@ -331,6 +331,14 @@ enum AVPacketSideDataType {
     AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT,
 
     /**
+     * User data unregistered metadata associated with a video frame.
+     * This is the H.26[45] UDU SEI message, and shouldn't be used for any other purpose
+     * The data is stored as uint8_t in AVFrameSideData.data which is 16 bytes of
+     * uuid_iso_iec_11578 followed by AVFrameSideData.size - 16 bytes of user_data_payload_byte.
+     */
+    AV_PKT_DATA_SEI_UNREGISTERED,
+
+    /**
      * The number of side data types.
      * This is not part of the public API/ABI in the sense that it may
      * change when new side data types are added.

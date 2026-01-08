@@ -32,7 +32,10 @@
 #include "log.h"
 #include "error.h"
 
+#define UNKNOWN_TC_STR "--:--:--:--"
+
 static int check_timecode(void *log_ctx, AVTimecode *tc);
+static int check_timecode_silent(const AVTimecode *tc);
 
 int av_timecode_adjust_ntsc_framenum2(int framenum, int fps)
 {
@@ -109,8 +112,10 @@ char *av_timecode_make_string(const AVTimecode *tc, char *buf, int framenum_arg)
     int hh, mm, ss, ff, ff_len, neg = 0;
     int64_t framenum = framenum_arg;
 
-    if (check_timecode(NULL, tc) < 0)
-        return NULL;
+    if (check_timecode_silent(tc) < 0) {
+        snprintf(buf, AV_TIMECODE_STR_SIZE, "%s", UNKNOWN_TC_STR);
+        return buf;
+    }
 
     framenum += tc->start;
     if (drop)
@@ -140,8 +145,10 @@ char *av_timecode_make_string_ms(const AVTimecode *tc, char *buf, int framenum_a
     int ff_ms;
     int64_t framenum = framenum_arg;
 
-    if (check_timecode(NULL, tc) < 0)
-        return NULL;
+    if (check_timecode_silent(tc) < 0) {
+        snprintf(buf, AV_TIMECODE_STR_SIZE, "%s:---", UNKNOWN_TC_STR);
+        return buf;
+    }
 
     framenum += tc->start;
     if (drop)
@@ -239,6 +246,17 @@ static int check_timecode(void *log_ctx, AVTimecode *tc)
     if (check_fps(tc->fps) < 0) {
         av_log(log_ctx, AV_LOG_WARNING, "Using non-standard frame rate %d/%d\n",
                tc->rate.num, tc->rate.den);
+    }
+    return 0;
+}
+
+static int check_timecode_silent(const AVTimecode *tc)
+{
+    if ((int)tc->fps <= 0) {
+        return AVERROR(EINVAL);
+    }
+    if ((tc->flags & AV_TIMECODE_FLAG_DROPFRAME) && tc->fps % 30 != 0) {
+        return AVERROR(EINVAL);
     }
     return 0;
 }

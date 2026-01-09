@@ -47,6 +47,7 @@ extern "C" {
 #include "libavutil/timecode.h"
 #include "libavutil/mathematics.h"
 #include "libavutil/reverse.h"
+#include "libavutil/uuid.h"
 #include "avdevice.h"
 #if CONFIG_LIBZVBI
 #include <libzvbi.h>
@@ -104,6 +105,8 @@ static VANCLineNumber vanc_line_numbers[] = {
     /* For all other modes, for which we don't support VANC */
     {bmdModeUnknown, 0, -1, -1, -1}
 };
+
+static AVTimecode tc_zero;
 
 #if BLACKMAGIC_DECKLINK_API_VERSION <= 0x0e020000
 class decklink_allocator : public IDeckLinkMemoryAllocator
@@ -927,6 +930,10 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     int64_t wallclock = 0, abs_wallclock = 0;
     struct decklink_cctx *cctx = (struct decklink_cctx *) avctx->priv_data;
     bool signalLocked = false;
+    int64_t ts_us;
+
+    // Get current real time
+    ts_us = av_gettime();
 
     if (S_OK != ctx->dls->GetFlag(bmdDeckLinkStatusVideoInputSignalLocked, &signalLocked)) {
         av_log(avctx, AV_LOG_ERROR, "Can't get video input signal lock status\n");
@@ -969,6 +976,8 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     // Handle Video Frame
     if (videoFrame) {
         AVPacket pkt = { 0 };
+        AVTimecode tc_raw = { 0 };
+        AVTimecode tcr = { 0 };
         if (ctx->frameCount % 25 == 0) {
             unsigned long long qsize = ff_decklink_packet_queue_size(&ctx->queue);
             av_log(avctx, AV_LOG_DEBUG,
@@ -1014,54 +1023,356 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                 }
             }
 
+            ctx->dropped++;
             if (!no_video) {
                 av_log(avctx, AV_LOG_WARNING, "Frame received (#%lu) - No input signal detected "
-                        "- Frames dropped %u\n", ctx->frameCount, ++ctx->dropped);
+                        "- Frames dropped %u\n", ctx->frameCount, ctx->dropped);
             }
             no_video = 1;
         } else {
             if (no_video) {
                 av_log(avctx, AV_LOG_WARNING, "Frame received (#%lu) - Input returned "
-                        "- Frames dropped %u\n", ctx->frameCount, ++ctx->dropped);
+                        "- Frames dropped %u\n", ctx->frameCount, ctx->dropped);
             }
             no_video = 0;
 
             // Handle Timecode (if requested)
             if (ctx->tc_format) {
-                AVTimecode tcr;
-                if (get_frame_timecode(avctx, ctx, &tcr, videoFrame) >= 0) {
-                    char tcstr[AV_TIMECODE_STR_SIZE];
-                    const char *tc = av_timecode_make_string(&tcr, tcstr, 0);
-                    if (tc) {
-                        AVDictionary* metadata_dict = NULL;
-                        uint8_t* packed_metadata;
+                if (get_frame_timecode(avctx, ctx, &tc_raw, videoFrame) >= 0) {
+                    if (ctx->no_timecode) {
+                        av_log(avctx, AV_LOG_WARNING, "Frame received (#%lu) - Found timecode "
+                        "- TC dropped %u\n", ctx->frameCount, ctx->no_tc_cnt);
+                    }
+                    ctx->no_timecode = 0;
 
-                        if (av_cmp_q(ctx->video_st->r_frame_rate, av_make_q(60, 1)) < 1) {
-                            uint32_t tc_data = av_timecode_get_smpte_from_framenum(&tcr, 0);
-                            int size = sizeof(uint32_t) * 4;
-                            uint32_t *sd = (uint32_t *)av_packet_new_side_data(&pkt, AV_PKT_DATA_S12M_TIMECODE, size);
-
-                            if (sd) {
-                                *sd       = 1;       // one TC
-                                *(sd + 1) = tc_data; // TC
-                            }
-                        }
-
-                        if (av_dict_set(&metadata_dict, "timecode", tc, 0) >= 0) {
-                            size_t metadata_len;
-                            packed_metadata = av_packet_pack_dictionary(metadata_dict, &metadata_len);
-                            av_dict_free(&metadata_dict);
-                            if (packed_metadata) {
-                                if (av_packet_add_side_data(&pkt, AV_PKT_DATA_STRINGS_METADATA, packed_metadata, metadata_len) < 0)
-                                    av_freep(&packed_metadata);
-                                else if (!ctx->tc_seen)
-                                    ctx->tc_seen = ctx->frameCount;
-                            }
-                        }
+                    if (cctx->tc_handle) {
+                        tc_raw.flags |= AV_TIMECODE_FLAG_24HOURSMAX;
+                    } else {
+                        tcr = tc_raw;
                     }
                 } else {
-                    av_log(avctx, AV_LOG_DEBUG, "Unable to find timecode.\n");
+                    ctx->no_tc_cnt++;
+                    if (!ctx->no_timecode) {
+                        av_log(avctx, AV_LOG_WARNING, "Frame received (#%lu) - Unable to find timecode "
+                        "- TC dropped %u\n", ctx->frameCount, ctx->no_tc_cnt);
+                    }
+                    ctx->no_timecode = 1;
                 }
+            }
+        }
+
+        if (ctx->tc_format) {
+            time_t ts_s;
+            int ts_s_mstail;
+            struct tm tm;
+            AVTimecode tc_ts = { 0 };
+
+            ts_s = (time_t)ts_us/1000000ll;
+            ts_s_mstail = (ts_us%1000000ll)/1000;
+            gmtime_r(&ts_s, &tm);
+
+            if (cctx->tc_handle) {
+                AVRational rate_c = ctx->video_st->r_frame_rate;
+                int ff_c = (ts_s_mstail * rate_c.num)/rate_c.den/1000;
+                av_timecode_init_from_components(&tc_ts, rate_c, AV_TIMECODE_FLAG_24HOURSMAX, tm.tm_hour, tm.tm_min, tm.tm_sec, ff_c, avctx);
+            }
+
+            // Handle raw TC checking
+            if (cctx->tc_handle && 0 < tc_raw.fps) {
+                tc_raw.flags |= AV_TIMECODE_FLAG_24HOURSMAX;
+                int diff;
+                if (0 == av_timecode_frame_diff(&tc_raw, &tc_zero, &diff, avctx)) {
+                    if (0 != diff) {
+                        if (ctx->tc_zeros) {
+                            av_log(avctx, AV_LOG_WARNING, "TCs aren't zeros again\n");
+                            ctx->tc_zeros = 0;
+                        }
+                    } else {
+                        if (!ctx->tc_zeros && 0 >= ctx->tc_last_raw.fps) {
+                            char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "The first TCs is zero, use TS TC - %s as a substitute\n", tc_ts_str);
+                            ctx->tc_zeros = 1;
+                            tcr = tc_ts;
+                        } else if (!ctx->tc_zeros && 0 == av_timecode_frame_diff(&ctx->tc_last_raw, &tc_raw, &diff, avctx) && 1 != diff) {
+                            char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "TCs dropped to zero, use TS TC - %s as a substitute\n", tc_ts_str);
+                            ctx->tc_zeros = 1;
+                            tcr = tc_ts;
+                        }
+                    }
+                }
+                if (ctx->tc_zeros) {
+                } else if (0 == av_timecode_frame_diff(&tc_raw, &tc_ts, &diff, avctx)) {
+                    if (tc_raw.fps < abs((int)(diff%(3600*tc_raw.fps)))) {
+                        // Check aligment
+                        if (!ctx->no_tc_align) {
+                            char tc_raw_str[AV_TIMECODE_STR_SIZE];
+                            char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_raw, tc_raw_str, 0);
+                            av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "TC isn't aligned with current time, TC - %s, TS TC - %s\n", tc_raw_str, tc_ts_str);
+                        }
+                        tcr = { 0 };
+                        ctx->no_tc_align = 1;
+                    } else if(tc_raw.fps < abs(diff)) {
+                        // Check TZ for UTC
+                        tcr = tc_raw;
+                        av_timecode_inc(&tcr, round(av_q2d({.num=diff, .den=3600*(int)tc_raw.fps}))*3600*(int)tc_raw.fps);
+                        if (!ctx->no_tc_utc) {
+                            char tc_raw_str[AV_TIMECODE_STR_SIZE];
+                            char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                            char tc_res_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_raw, tc_raw_str, 0);
+                            av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                            av_timecode_make_string(&tcr, tc_res_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "TC isn't UTC one, TC - %s, TS TC - %s, res. TC - %s\n", tc_raw_str, tc_ts_str, tc_res_str);
+                        }
+                        if (ctx->no_tc_align) {
+                            av_log(avctx, AV_LOG_WARNING, "TC is aligned with current time again\n");
+                        }
+                        ctx->no_tc_align = 0;
+                        ctx->no_tc_utc = 1;
+                    } else {
+                        if (ctx->no_tc_align) {
+                            av_log(avctx, AV_LOG_WARNING, "TC is aligned with current time again\n");
+                        }
+                        ctx->no_tc_align = 0;
+                        if (ctx->no_tc_utc) {
+                            av_log(avctx, AV_LOG_WARNING, "TC is UTC again\n");
+                        }
+                        ctx->no_tc_utc = 0;
+                        tcr = tc_raw;
+                    }
+                } else {
+                    if (!ctx->tc_err) {
+                        av_log(avctx, AV_LOG_ERROR, "TC handle error: Can't compare current TC with a timestamp's one\n");
+                    }
+                    tcr = { 0 };
+                    ctx->tc_err = 1;
+                }
+                if (!ctx->tc_zeros && 0 >= ctx->tc_last_raw.fps) {
+                    char tc_raw_str[AV_TIMECODE_STR_SIZE];
+                    char tc_res_str[AV_TIMECODE_STR_SIZE];
+                    av_timecode_make_string(&tc_raw, tc_raw_str, 0);
+                    av_timecode_make_string(&tcr, tc_res_str, 0);
+                    av_log(avctx, AV_LOG_INFO, "Found the first TC - %s, res. TC - %s\n", tc_raw_str, tc_res_str);
+                }
+                else if (!ctx->tc_zeros && 0 < ctx->tc_last_raw.fps) {
+                    // Check TC consistency
+                    if (0 != av_cmp_q(tc_raw.rate, ctx->tc_last_raw.rate)) {
+                        // Video rate changing
+                        av_log(avctx, AV_LOG_WARNING, "Video rate was changed from %d/%d to %d/%d\n", ctx->tc_last.rate.num, ctx->tc_last.rate.den, tc_raw.rate.num, tc_raw.rate.den);
+                        // tcr = tc_raw;
+                    } else if (0 == av_timecode_frame_diff(&ctx->tc_last_raw, &tc_raw, &diff, avctx)) {
+                        // Raw TCs gap measurement
+                        if (1 != diff) {
+                            char tc_raw_str[AV_TIMECODE_STR_SIZE];
+                            char tc_last_raw_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tc_raw, tc_raw_str, 0);
+                            av_timecode_make_string(&ctx->tc_last_raw, tc_last_raw_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "A gap between raw TC - %d frames, TC - %s, last TC - %s\n", diff, tc_raw_str, tc_last_raw_str);
+                        }
+                        // tcr = tc_raw;
+                    } else {
+                        if (!ctx->tc_err) {
+                            av_log(avctx, AV_LOG_ERROR, "TC handle error: Can't compare current TC with a previous one\n");
+                        }
+                        tcr = { 0 };
+                        ctx->tc_err = 1;
+                    }
+                }
+                ctx->tc_last_raw = tc_raw;
+            }
+
+            // Handle TC gaps
+            if (cctx->tc_handle) {
+                if (0 >= tcr.fps ) {
+                    // On TC absence
+                    if (0 < ctx->tc_last.fps ) {
+                        // Increment previous one
+                        tcr = ctx->tc_last;
+                        tcr.flags |= AV_TIMECODE_FLAG_24HOURSMAX;
+                        av_timecode_inc(&tcr, 1);
+                    } else if (0 >= ctx->tc_last.fps) {
+                        // Create new one
+                        char tc_ts_str[AV_TIMECODE_STR_SIZE];
+                        av_timecode_make_string(&tc_ts, tc_ts_str, 0);
+                        av_log(avctx, AV_LOG_WARNING, "Use TS TC - %s as the first TC\n", tc_ts_str);
+                        tcr = tc_ts;
+                    }
+                } else if (0 >= ctx->tc_last.fps) {
+                } else if (0 < ctx->tc_last.fps) {
+                    int diff;
+                    if (0 == av_timecode_frame_diff(&ctx->tc_last, &tcr, &diff, avctx)) {
+                        // Resulting TCs gap measurement
+                        if (1 != diff) {
+                            char tcr_str[AV_TIMECODE_STR_SIZE];
+                            char tc_last_str[AV_TIMECODE_STR_SIZE];
+                            av_timecode_make_string(&tcr, tcr_str, 0);
+                            av_timecode_make_string(&ctx->tc_last, tc_last_str, 0);
+                            av_log(avctx, AV_LOG_WARNING, "A gap between resulting TC - %d frames, TC - %s, last TC - %s\n", diff, tcr_str, tc_last_str);
+                        }
+                    }
+                }
+            }
+
+            if (0 < tcr.fps) {
+                /**
+                 * "TC" - "HH:MM:SS:FF",
+                 * "TC_RAW" - "HH:MM:SS:FF",
+                 * "TC_TS" - "YYYY-MM-DDTHH:MM:SS.sssZ",
+                 * "TS" - "YYYY-MM-DDTHH:MM:SS.sssZ",
+                 */
+
+                char udu_tc_str[AV_TIMECODE_STR_SIZE];
+                const char * udu_tc_str_ptr = NULL;
+                char udu_tc_ms_str[AV_TIMECODE_STR_SIZE];
+                const char * udu_tc_ms_str_ptr = NULL;
+                char udu_tc_raw_str[AV_TIMECODE_STR_SIZE];
+                const char * udu_tc_raw_str_ptr = NULL;
+                char udu_tc_ts_str[25];
+                const char * udu_tc_ts_str_ptr = NULL;
+                char udu_ts_str[25];
+                const char * udu_ts_str_ptr = NULL;
+
+                int64_t ts_ms_raw = ts_us/1000;
+                time_t ts_s_raw = ts_ms_raw/1000;
+                struct tm tm_raw;
+                int64_t ts_ms_tc = 0;
+                time_t ts_s_tc;
+                struct tm tm_tc;
+
+                gmtime_r(&ts_s_raw, &tm_raw);
+
+                // Generate aligned TS for TC
+                {
+                    int hh, mm, ss, ff, flags, neg;
+                    AVRational rate;
+                    int ts_ms_today, tc_ms_today;
+
+                    ts_ms_today = (tm_raw.tm_sec*1) + (tm_raw.tm_min*60) + (tm_raw.tm_hour*60*60);
+                    ts_ms_today = (ts_ms_today*1000) + (int)(ts_ms_raw%1000ll);
+
+                    if (0 == av_timecode_extract_components(&tcr, &rate, &flags, &neg, &hh, &mm, &ss, &ff, ctx)) {
+                        tc_ms_today = (ss*1) + (mm*60) + (hh*60*60);
+                        tc_ms_today = (tc_ms_today*1000) + (ff*ctx->r_frame_dur_ms);
+
+                        ts_ms_tc = ts_ms_raw - ts_ms_today;
+                        /**
+                         * if tc_hh==23 and chunk["hour"]==0:
+                         *     ts_ms -= 24*3600*1000
+                         * elif tc_hh==0 and chunk["hour"]==23:
+                         *     ts_ms += 24*3600*1000
+                         */
+                        if (tm_raw.tm_hour == 0 && hh == 23) {
+                            ts_ms_tc -= 24*3600*1000;
+                        } else if (tm_raw.tm_hour == 23 && hh == 0) {
+                            ts_ms_tc += 24*3600*1000;
+                        }
+                        ts_ms_tc += tc_ms_today;
+                    }
+                }
+                ts_s_tc = ts_ms_tc/1000;
+                gmtime_r(&ts_s_tc, &tm_tc);
+
+                // Generate UDU SEI and according metadata for the TimeCode
+
+                AVDictionary* metadata_dict = NULL;
+                uint8_t* packed_metadata;
+
+                if (av_cmp_q(ctx->video_st->r_frame_rate, av_make_q(60, 1)) < 1) {
+                    uint32_t tc_data = av_timecode_get_smpte_from_framenum(&tcr, 0);
+                    int size = sizeof(uint32_t) * 4;
+                    uint32_t *sd = (uint32_t *)av_packet_new_side_data(&pkt, AV_PKT_DATA_S12M_TIMECODE, size);
+
+                    if (sd) {
+                        *sd       = 1;       // one TC
+                        *(sd + 1) = tc_data; // TC
+                    }
+                }
+
+                if (NULL != (udu_tc_str_ptr = av_timecode_make_string(&tcr, udu_tc_str, 0))) {
+                    if (av_dict_set(&metadata_dict, "udu_tc", udu_tc_str_ptr, 0) < 0) {
+                        av_log(ctx, AV_LOG_ERROR, "'udu_tc' metadata adding error.\n");
+                    }
+                    if (av_dict_set(&metadata_dict, "timecode", udu_tc_str_ptr, 0) < 0) {
+                        av_log(ctx, AV_LOG_ERROR, "'timecode' metadata adding error.\n");
+                    }
+                }
+                if (NULL != (udu_tc_ms_str_ptr = av_timecode_make_string_ms(&tcr, udu_tc_ms_str, 0))) {
+                    if (av_dict_set(&metadata_dict, "timecode_ms", udu_tc_ms_str_ptr, 0) < 0) {
+                        av_log(ctx, AV_LOG_ERROR, "'timecode_ms' metadata adding error.\n");
+                    }
+                }
+                if (NULL != (udu_tc_raw_str_ptr = av_timecode_make_string(&tc_raw, udu_tc_raw_str, 0))) {
+                    if (av_dict_set(&metadata_dict, "udu_tc_raw", udu_tc_raw_str_ptr, 0) < 0) {
+                        av_log(ctx, AV_LOG_ERROR, "'udu_tc_raw' metadata adding error.\n");
+                    }
+                }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+                if (0 < snprintf(udu_ts_str, sizeof(udu_ts_str), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm_raw.tm_year+1900, tm_raw.tm_mon+1, tm_raw.tm_mday, tm_raw.tm_hour, tm_raw.tm_min, tm_raw.tm_sec, (int)(ts_ms_raw%1000ll))) {
+                    udu_ts_str_ptr = udu_ts_str;
+                    if (av_dict_set(&metadata_dict, "timestamp_ms", udu_ts_str_ptr, 0) < 0) {
+                        av_log(ctx, AV_LOG_ERROR, "'timestamp_ms' metadata adding error.\n");
+                    }
+                    if (av_dict_set(&metadata_dict, "udu_ts", udu_ts_str_ptr, 0) < 0) {
+                        av_log(ctx, AV_LOG_ERROR, "'udu_ts' metadata adding error.\n");
+                    }
+                }
+                if (0 < snprintf(udu_tc_ts_str, sizeof(udu_tc_ts_str), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm_tc.tm_year+1900, tm_tc.tm_mon+1, tm_tc.tm_mday, tm_tc.tm_hour, tm_tc.tm_min, tm_tc.tm_sec, (int)(ts_ms_tc%1000ll))) {
+                    udu_tc_ts_str_ptr = udu_tc_ts_str;
+                    if (av_dict_set(&metadata_dict, "udu_tc_ts", udu_tc_ts_str_ptr, 0) < 0) {
+                        av_log(ctx, AV_LOG_ERROR, "'udu_tc_ts' metadata adding error.\n");
+                    }
+                }
+#pragma GCC diagnostic pop
+
+                if (UDU_SEI_JSON == cctx->udu_sei) {
+                    /**
+                     * {
+                     *   "TC":"HH:MM:SS:FF",
+                     *   "TC_RAW":"HH:MM:SS:FF",
+                     *   "TC_TS":"YYYY-MM-DDTHH:MM:SS.sssZ",
+                     *   "TS":"YYYY-MM-DDTHH:MM:SS.sssZ",
+                     * }
+                     */
+                    // TODO: Use dynamic JSON builder
+                    const char * mask = "{\"TC\":\"%s\",\"TC_RAW\":\"%s\",\"TC_TS\":\"%s\",\"TS\":\"%s\"}";
+#define UDU_SEI_JSON_BUF_SIZE sizeof("{\"TC\":\"HH:MM:SS:FF\",\"TC_RAW\":\"HH:MM:SS:FF\",\"TC_TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\",\"TS\":\"YYYY-MM-DDTHH:MM:SS.sssZ\"}")
+                    char buf[AV_UUID_LEN + UDU_SEI_JSON_BUF_SIZE];
+                    int sd_size;
+                    memcpy(buf, cctx->udu_sei_uuid, AV_UUID_LEN);
+                    if (0 < (sd_size = snprintf(buf+AV_UUID_LEN, UDU_SEI_JSON_BUF_SIZE, mask, udu_tc_str_ptr, udu_tc_raw_str_ptr, udu_tc_ts_str_ptr, udu_ts_str_ptr))) {
+                        uint8_t *sd = NULL;
+                        sd_size+=AV_UUID_LEN;
+                        sd = av_packet_new_side_data(&pkt, AV_PKT_DATA_SEI_UNREGISTERED, sd_size);
+                        if (NULL != sd) {
+                            memcpy(sd, buf, sd_size);
+                        } else {
+                            av_log(ctx, AV_LOG_ERROR, "UDU SEI JSON timecode side data adding error.\n");
+                        }
+                    } else {
+                        av_log(ctx, AV_LOG_ERROR, "UDU SEI JSON timecode filling error.\n");
+                    }
+                }
+
+
+                if (NULL != metadata_dict) {
+                    size_t metadata_len;
+                    packed_metadata = av_packet_pack_dictionary(metadata_dict, &metadata_len);
+                    av_dict_free(&metadata_dict);
+                    if (packed_metadata) {
+                        if (av_packet_add_side_data(&pkt, AV_PKT_DATA_STRINGS_METADATA, packed_metadata, metadata_len) < 0)
+                            av_freep(&packed_metadata);
+                        else if (!ctx->tc_seen)
+                            ctx->tc_seen = ctx->frameCount;
+                    }
+                }
+
+                ctx->tc_last = tcr;
             }
         }
 
@@ -1289,6 +1600,10 @@ av_cold int ff_decklink_read_close(AVFormatContext *avctx)
     ff_decklink_cleanup(avctx);
     ff_decklink_packet_queue_end(&ctx->queue);
 
+    if (NULL != cctx->udu_sei_uuid) {
+        av_freep(&cctx->udu_sei_uuid);
+    }
+
     av_freep(&cctx->ctx);
 
     return 0;
@@ -1330,6 +1645,21 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
     if (cctx->raw_format > 0 && (unsigned int)cctx->raw_format < FF_ARRAY_ELEMS(decklink_raw_format_map))
         ctx->raw_format = decklink_raw_format_map[cctx->raw_format];
     cctx->ctx = ctx;
+
+    if (UDU_SEI_NONE != cctx->udu_sei) {
+        if (NULL == cctx->udu_sei_uuid_str) {
+            av_log(ctx, AV_LOG_ERROR, "SEI UUID wasn't set.\n");
+            return AVERROR(EINVAL);
+        } else {
+            AVUUID uuid;
+            if (0 == av_uuid_parse(cctx->udu_sei_uuid_str, uuid)) {
+                cctx->udu_sei_uuid = (char *)av_memdup(uuid, AV_UUID_LEN);
+            } else {
+                av_log(ctx, AV_LOG_ERROR, "SEI UUID \"%s\" wasn't parsed.\n", cctx->udu_sei_uuid_str);
+                return AVERROR(EINVAL);
+            }
+        }
+    }
 
     /* Check audio channel option for valid values: 2, 8 or 16 */
     switch (cctx->audio_channels) {
@@ -1461,6 +1791,9 @@ av_cold int ff_decklink_read_header(AVFormatContext *avctx)
     st->time_base.den      = ctx->bmd_tb_den;
     st->time_base.num      = ctx->bmd_tb_num;
     st->r_frame_rate       = av_make_q(st->time_base.den, st->time_base.num);
+    ctx->r_frame_dur_ms    = (1000*st->time_base.num)/st->time_base.den;
+
+    av_timecode_init_from_components(&tc_zero, st->r_frame_rate, AV_TIMECODE_FLAG_24HOURSMAX, 00, 00, 00, 00, avctx);
 
     switch(ctx->raw_format) {
     case bmdFormat8BitYUV:
@@ -1591,7 +1924,11 @@ int ff_decklink_read_packet(AVFormatContext *avctx, AVPacket *pkt)
 
     ff_decklink_packet_queue_get(&ctx->queue, pkt, 1);
 
-    if (ctx->tc_format && !(av_dict_get(ctx->video_st->metadata, "timecode", NULL, 0))) {
+    if (ctx->tc_format && (
+        !av_dict_get(ctx->video_st->metadata, "timecode", NULL, 0) ||
+        !av_dict_get(ctx->video_st->metadata, "timecode_ms", NULL, 0) ||
+        !av_dict_get(ctx->video_st->metadata, "timestamp_ms", NULL, 0)
+    )) {
         size_t size;
         const uint8_t *side_metadata = av_packet_get_side_data(pkt, AV_PKT_DATA_STRINGS_METADATA, &size);
         if (side_metadata) {

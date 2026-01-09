@@ -34,6 +34,7 @@ extern "C" {
 #include "libavfilter/ccfifo.h"
 }
 #include "libavutil/thread.h"
+#include "libavutil/timecode.h"
 #include "decklink_common_c.h"
 #if CONFIG_LIBKLVANC
 #include "libklvanc/vanc.h"
@@ -141,6 +142,23 @@ struct decklink_ctx {
     AVStream *teletext_st;
     uint16_t cdp_sequence_num;
     bool last_sig_lock;
+
+    /* TC */
+    // No TC in stream
+    int no_timecode;
+    // Counter of frames without TC
+    unsigned int no_tc_cnt;
+    // TC isn't aligned to current time
+    int no_tc_align;
+    // TC isn't UTC
+    int no_tc_utc;
+    // TC handling error
+    int tc_err;
+    // TCs are zeros
+    int tc_zeros;
+    AVTimecode tc_last;
+    AVTimecode tc_last_raw;
+    int r_frame_dur_ms;
 
     /* Options */
     int list_devices;

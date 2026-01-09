@@ -214,13 +214,18 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             int tail_ms = (((s->current_frame_ts_us%1000000ll)/s->frame_us)*s->frame_us)/1000;
             struct tm tm;
             gmtime_r(&ts_s, &tm);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
             if (0 < snprintf(udu_tc_ts_str, sizeof(udu_tc_ts_str), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, tail_ms)) {
                 udu_tc_ts_str_ptr = udu_tc_ts_str;
                 if (av_dict_set(&frame->metadata, "udu_tc_ts", udu_tc_ts_str_ptr, 0) < 0) {
                     av_log(ctx, AV_LOG_ERROR, "'udu_tc_ts' metadata adding error.\n");
                 }
             }
+#pragma GCC diagnostic pop
         }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
         if (0 < snprintf(udu_ts_str, sizeof(udu_ts_str), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm_raw.tm_year+1900, tm_raw.tm_mon+1, tm_raw.tm_mday, tm_raw.tm_hour, tm_raw.tm_min, tm_raw.tm_sec, (int)(ts_ms_raw%1000ll))) {
             udu_ts_str_ptr = udu_ts_str;
             if (av_dict_set(&frame->metadata, "timestamp_ms", udu_ts_str_ptr, 0) < 0) {
@@ -230,6 +235,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                 av_log(ctx, AV_LOG_ERROR, "'udu_ts' metadata adding error.\n");
             }
         }
+#pragma GCC diagnostic pop
         if (UDU_SEI_JSON == s->udu_sei) {
             /**
              * {

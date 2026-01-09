@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <ctype.h>
 
 #include "libavutil/avstring.h"
 #include "libavutil/channel_layout.h"
@@ -37,6 +38,7 @@
 #include "libavutil/spherical.h"
 #include "libavutil/stereo3d.h"
 #include "libavutil/timecode.h"
+#include "libavutil/uuid.h"
 
 #include "libavcodec/avcodec.h"
 
@@ -430,6 +432,27 @@ static void dump_s12m_timecode(void *ctx, const AVStream *st, const AVPacketSide
     }
 }
 
+static void dump_sei_unregistered_metadata(void *ctx, const AVPacketSideData *sd)
+{
+    const uint8_t *user_data = sd->data;
+    const char *format = NULL;
+
+    if (sd->size < AV_UUID_LEN) {
+        av_log(ctx, AV_LOG_ERROR, "invalid data(%"SIZE_SPECIFIER" < "
+               "UUID(%d-bytes))\n", sd->size, AV_UUID_LEN);
+        return;
+    }
+
+    av_log(ctx, AV_LOG_INFO, "UUID=" AV_PRI_UUID "\n", AV_UUID_ARG(user_data));
+
+    av_log(ctx, AV_LOG_INFO, "User Data=");
+    for (size_t i = 16; i < sd->size; i++) {
+        format = isprint(user_data[i]) ? "%c" : "\\x%02x";
+        av_log(ctx, AV_LOG_INFO, format, user_data[i]);
+    }
+    av_log(ctx, AV_LOG_INFO, "\n");
+}
+
 static void dump_sidedata(void *ctx, const AVStream *st, const char *indent,
                           int log_level)
 {
@@ -503,6 +526,10 @@ static void dump_sidedata(void *ctx, const AVStream *st, const char *indent,
             break;
         case AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT:
             dump_ambient_viewing_environment_metadata(ctx, sd);
+            break;
+        case AV_PKT_DATA_SEI_UNREGISTERED:
+            av_log(ctx, log_level, "H.26[45] User Data Unregistered SEI message: ");
+            dump_sei_unregistered_metadata(ctx, sd);
             break;
         default:
             av_log(ctx, log_level, "unknown side data type %d "

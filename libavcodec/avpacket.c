@@ -300,6 +300,7 @@ const char *av_packet_side_data_name(enum AVPacketSideDataType type)
     case AV_PKT_DATA_ICC_PROFILE:                return "ICC Profile";
     case AV_PKT_DATA_DOVI_CONF:                  return "DOVI configuration record";
     case AV_PKT_DATA_S12M_TIMECODE:              return "SMPTE ST 12-1:2014 timecode";
+    case AV_PKT_DATA_SEI_UNREGISTERED:           return "H.26[45] User Data Unregistered SEI message";
     case AV_PKT_DATA_DYNAMIC_HDR10_PLUS:         return "HDR10+ Dynamic Metadata (SMPTE 2094-40)";
     case AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT:return "Ambient viewing environment";
     case AV_PKT_DATA_IAMF_MIX_GAIN_PARAM:        return "IAMF Mix Gain Parameter Data";

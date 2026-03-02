@@ -21,6 +21,7 @@ OBJS = allformats.o         \
        metadata.o           \
        mux.o                \
        mux_utils.o          \
+       nal.o                \
        options.o            \
        os_support.o         \
        protocols.o          \
@@ -35,7 +36,6 @@ OBJS-$(HAVE_LIBC_MSVCRT)                 += file_open.o
 
 # subsystems
 OBJS-$(CONFIG_ISO_MEDIA)                 += isom.o
-OBJS-$(CONFIG_ISO_WRITER)                += av1.o avc.o hevc.o nal.o vvc.o vpcc.o
 OBJS-$(CONFIG_IAMFDEC)                   += iamf_reader.o iamf_parse.o iamf.o
 OBJS-$(CONFIG_IAMFENC)                   += iamf_writer.o iamf.o
 OBJS-$(CONFIG_NETWORK)                   += network.o

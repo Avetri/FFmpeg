@@ -32,6 +32,7 @@
 #include "libavutil/mem.h"
 #include "libavutil/random_seed.h"
 #include "libavutil/time.h"
+#include "libavutil/file.h"
 #include "avc.h"
 #include "nal.h"
 #include "avio_internal.h"
@@ -347,6 +348,7 @@ typedef struct WHIPContext {
      * See https://www.ietf.org/archive/id/draft-ietf-wish-whip-08.html#name-authentication-and-authoriz
      */
     char* authorization;
+    char* authorization_file;
     /* The certificate and private key used for DTLS handshake. */
     char* cert_file;
     char* key_file;
@@ -404,6 +406,30 @@ static av_cold int certificate_key_init(AVFormatContext *s)
     return ret;
 }
 
+/**
+ * Read a berarer token from file
+ */
+static av_cold int bearer_token_read(AVFormatContext *s)
+{
+    int ret = 0;
+    WHIPContext *whip = s->priv_data;
+
+    if (whip->authorization_file) {
+        uint8_t *bearer;
+        size_t size;
+        ret = av_file_map(whip->authorization_file, &bearer, &size, 0, NULL);
+        if (ret < 0)
+            goto err;
+        bearer[size] = 0;
+        av_freep(&whip->authorization);
+        whip->authorization = av_strndup(bearer, strlen(bearer));
+        av_file_unmap(bearer, size);
+    }
+
+err:
+    return ret;
+}
+
 static av_cold int dtls_initialize(AVFormatContext *s)
 {
     int ret = 0;
@@ -449,6 +475,12 @@ static av_cold int initialize(AVFormatContext *s)
     uint32_t seed;
 
     whip->whip_starttime = av_gettime_relative();
+
+    ret = bearer_token_read(s);
+    if (ret < 0) {
+        av_log(whip, AV_LOG_ERROR, "Failed to read a bearer token\n");
+        return ret;
+    }
 
     ret = certificate_key_init(s);
     if (ret < 0) {
@@ -2146,6 +2178,7 @@ static av_cold void whip_deinit(AVFormatContext *s)
     av_freep(&whip->ice_pwd_remote);
     av_freep(&whip->ice_protocol);
     av_freep(&whip->ice_host);
+    av_freep(&whip->authorization_file);
     av_freep(&whip->authorization);
     av_freep(&whip->cert_file);
     av_freep(&whip->key_file);
@@ -2188,6 +2221,7 @@ static const AVOption options[] = {
     { "dtls_active",        "Set dtls role as active",                                  0,                          AV_OPT_TYPE_CONST,  { .i64 = WHIP_DTLS_ACTIVE}, 0, UINT_MAX, ENC, .unit = "flags" },
     { "rtp_history",        "The number of RTP history items to store",                 OFFSET(hist_sz),            AV_OPT_TYPE_INT,    { .i64 = WHIP_RTP_HISTORY_DEFAULT }, WHIP_RTP_HISTORY_MIN, WHIP_RTP_HISTORY_MAX, ENC },
     { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
+    { "authorization_file", "The token's file path",                                    OFFSET(authorization_file), AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { NULL },

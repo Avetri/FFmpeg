@@ -9,6 +9,7 @@
 #include "video.h"
 #include "libavutil/rational.h"
 #include "libavutil/uuid.h"
+#include "libavutil/mem.h"
 
 #include <time.h>
 

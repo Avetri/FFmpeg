@@ -31,6 +31,8 @@
 #include "libavutil/thread.h"
 #include "libavutil/avassert.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mem.h"
+#include "libavutil/file.h"
 
 #include "avformat.h"
 #include "internal.h"
@@ -747,30 +749,17 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
             s->pbkeylen = strtol(buf, NULL, 10);
         }
         if (av_find_info_tag(buf, sizeof(buf), "passphrase_file", p)) {
-            int fd = -1;
-            int l = -1;
-            char pass[65];
+            size_t l;
+            uint8_t * pass;
             av_freep(&s->passphrase_file);
-            av_freep(&s->passphrase);
             s->passphrase_file = av_strndup(buf, strlen(buf));
-            if (-1 == (fd = open(s->passphrase_file, 0, O_RDONLY)))
-            {
-                ret = AVERROR(errno);
+            ret = av_file_map(s->passphrase_file, &pass, &l, 0, NULL);
+            if (ret < 0)
                 goto err;
-            }
-            if (-1 == (l = read(fd, pass, 64)))
-            {
-                ret = AVERROR(errno);
-                goto err;
-            }
-            if (0 == l)
-            {
-                ret = AVERROR(EINVAL);
-                goto err;
-            }
             pass[l] = 0;
-            close(fd);
+            av_freep(&s->passphrase);
             s->passphrase = av_strndup(pass, strlen(pass));
+            av_file_unmap(pass, l);
         }
         if (av_find_info_tag(buf, sizeof(buf), "packetfilter", p)) {
             av_freep(&s->packetfilter);

@@ -489,6 +489,7 @@ static void * libsrtm_thread_listener(void * data)
             if (srt_getlasterror(NULL) != SRT_ETIMEOUT) {
                 av_log(h, AV_LOG_ERROR, "%s(), port %d: srt_epoll_wait() error!\n", __FUNCTION__, s->port);
                 libsrtm_neterrno(h);
+                s->evac = 1;
             }
             continue;
         }
@@ -940,6 +941,10 @@ static int libsrtm_write(URLContext *h, const uint8_t *buf, int size)
 
     av_assert0(0 <= size);
     av_assert0(SRT_LIVE_DEFAULT_PAYLOAD_SIZE >= size);
+
+    if (1 == s->evac) {
+        return AVERROR(EIO);
+    }
 
     bucket = g_async_queue_try_pop(s->pool);
     if (NULL != bucket) {

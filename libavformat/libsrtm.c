@@ -187,7 +187,7 @@ static const AVOption libsrtm_options[] = {
     { NULL }
 };
 
-static int libsrt_neterrno(URLContext *h)
+static int libsrtm_neterrno(URLContext *h)
 {
     int os_errno;
     int err = srt_getlasterror(&os_errno);
@@ -197,7 +197,7 @@ static int libsrt_neterrno(URLContext *h)
     return os_errno ? AVERROR(os_errno) : AVERROR_UNKNOWN;
 }
 
-static int libsrt_getsockopt(URLContext *h, int fd, SRT_SOCKOPT optname, const char * optnamestr, void * optval, int * optlen)
+static int libsrtm_getsockopt(URLContext *h, int fd, SRT_SOCKOPT optname, const char * optnamestr, void * optval, int * optlen)
 {
     if (srt_getsockopt(fd, 0, optname, optval, optlen) < 0) {
         av_log(h, AV_LOG_ERROR, "failed to get option %s on socket: %s\n", optnamestr, srt_getlasterror_str());
@@ -206,7 +206,7 @@ static int libsrt_getsockopt(URLContext *h, int fd, SRT_SOCKOPT optname, const c
     return 0;
 }
 
-static int libsrt_socket_nonblock(int socket, int enable)
+static int libsrtm_socket_nonblock(int socket, int enable)
 {
     int ret, blocking = enable ? 0 : 1;
     /* Setting SRTO_{SND,RCV}SYN options to 1 enable blocking mode, setting them to 0 enable non-blocking mode. */
@@ -216,20 +216,20 @@ static int libsrt_socket_nonblock(int socket, int enable)
     return srt_setsockopt(socket, 0, SRTO_RCVSYN, &blocking, sizeof(blocking));
 }
 
-static int libsrt_epoll_create(URLContext *h, int fd)
+static int libsrtm_epoll_create(URLContext *h, int fd)
 {
     int modes = SRT_EPOLL_ACCEPT;
     int eid = srt_epoll_create();
     if (eid < 0)
-        return libsrt_neterrno(h);
+        return libsrtm_neterrno(h);
     if (srt_epoll_add_usock(eid, fd, &modes) < 0) {
         srt_epoll_release(eid);
-        return libsrt_neterrno(h);
+        return libsrtm_neterrno(h);
     }
     return eid;
 }
 
-static int libsrt_setsockopt(URLContext *h, int fd, SRT_SOCKOPT optname, const char * optnamestr, const void * optval, int optlen)
+static int libsrtm_setsockopt(URLContext *h, int fd, SRT_SOCKOPT optname, const char * optnamestr, const void * optval, int optlen)
 {
     if (srt_setsockopt(fd, 0, optname, optval, optlen) < 0) {
         av_log(h, AV_LOG_ERROR, "failed to set option %s on socket: %s\n", optnamestr, srt_getlasterror_str());
@@ -242,11 +242,11 @@ static int libsrt_setsockopt(URLContext *h, int fd, SRT_SOCKOPT optname, const c
      They MAY have also some meaning when set prior to connecting; such
      option is SRTO_RCVSYN, which makes connect/accept call asynchronous.
      Because of that this option is treated special way in this app. */
-static int libsrt_set_options_post(URLContext *h, int fd)
+static int libsrtm_set_options_post(URLContext *h, int fd)
 {
     SRTContext *s = h->priv_data;
 
-    if (s->oheadbw >= 0 && libsrt_setsockopt(h, fd, SRTO_OHEADBW, "SRTO_OHEADBW", &s->oheadbw, sizeof(s->oheadbw)) < 0) {
+    if (s->oheadbw >= 0 && libsrtm_setsockopt(h, fd, SRTO_OHEADBW, "SRTO_OHEADBW", &s->oheadbw, sizeof(s->oheadbw)) < 0) {
         return AVERROR(EIO);
     }
     return 0;
@@ -255,7 +255,7 @@ static int libsrt_set_options_post(URLContext *h, int fd)
 /* - The "PRE" options must be set prior to connecting and can't be altered
      on a connected socket, however if set on a listening socket, they are
      derived by accept-ed socket. */
-static int libsrt_set_options_pre(URLContext *h, int fd)
+static int libsrtm_set_options_pre(URLContext *h, int fd)
 {
     SRTContext *s = h->priv_data;
     int yes = 1;
@@ -268,46 +268,46 @@ static int libsrt_set_options_pre(URLContext *h, int fd)
     int connect_timeout = s->connect_timeout;
     SRT_TRANSTYPE transtype = SRTT_LIVE;
 
-    if ((libsrt_setsockopt(h, fd, SRTO_TRANSTYPE, "SRTO_TRANSTYPE", &transtype, sizeof(transtype)) < 0) ||
-        (s->maxbw >= 0 && libsrt_setsockopt(h, fd, SRTO_MAXBW, "SRTO_MAXBW", &s->maxbw, sizeof(s->maxbw)) < 0) ||
-        (s->pbkeylen >= 0 && libsrt_setsockopt(h, fd, SRTO_PBKEYLEN, "SRTO_PBKEYLEN", &s->pbkeylen, sizeof(s->pbkeylen)) < 0) ||
-        (s->passphrase && libsrt_setsockopt(h, fd, SRTO_PASSPHRASE, "SRTO_PASSPHRASE", s->passphrase, strlen(s->passphrase)) < 0) ||
-        (s->packetfilter && libsrt_setsockopt(h, fd, SRTO_PACKETFILTER, "SRTO_PACKETFILTER", s->packetfilter, strlen(s->packetfilter)) < 0) ||
-        (s->drifttracer >= 0 && libsrt_setsockopt(h, fd, SRTO_DRIFTTRACER, "SRTO_DRIFTTRACER", &s->drifttracer, sizeof(s->drifttracer)) < 0) ||
+    if ((libsrtm_setsockopt(h, fd, SRTO_TRANSTYPE, "SRTO_TRANSTYPE", &transtype, sizeof(transtype)) < 0) ||
+        (s->maxbw >= 0 && libsrtm_setsockopt(h, fd, SRTO_MAXBW, "SRTO_MAXBW", &s->maxbw, sizeof(s->maxbw)) < 0) ||
+        (s->pbkeylen >= 0 && libsrtm_setsockopt(h, fd, SRTO_PBKEYLEN, "SRTO_PBKEYLEN", &s->pbkeylen, sizeof(s->pbkeylen)) < 0) ||
+        (s->passphrase && libsrtm_setsockopt(h, fd, SRTO_PASSPHRASE, "SRTO_PASSPHRASE", s->passphrase, strlen(s->passphrase)) < 0) ||
+        (s->packetfilter && libsrtm_setsockopt(h, fd, SRTO_PACKETFILTER, "SRTO_PACKETFILTER", s->packetfilter, strlen(s->packetfilter)) < 0) ||
+        (s->drifttracer >= 0 && libsrtm_setsockopt(h, fd, SRTO_DRIFTTRACER, "SRTO_DRIFTTRACER", &s->drifttracer, sizeof(s->drifttracer)) < 0) ||
 #if SRT_VERSION_VALUE >= 0x010302
 #if SRT_VERSION_VALUE >= 0x010401
-        (s->enforced_encryption >= 0 && libsrt_setsockopt(h, fd, SRTO_ENFORCEDENCRYPTION, "SRTO_ENFORCEDENCRYPTION", &s->enforced_encryption, sizeof(s->enforced_encryption)) < 0) ||
+        (s->enforced_encryption >= 0 && libsrtm_setsockopt(h, fd, SRTO_ENFORCEDENCRYPTION, "SRTO_ENFORCEDENCRYPTION", &s->enforced_encryption, sizeof(s->enforced_encryption)) < 0) ||
 #else
         /* SRTO_STRICTENC == SRTO_ENFORCEDENCRYPTION (53), but for compatibility, we used SRTO_STRICTENC */
-        (s->enforced_encryption >= 0 && libsrt_setsockopt(h, fd, SRTO_STRICTENC, "SRTO_STRICTENC", &s->enforced_encryption, sizeof(s->enforced_encryption)) < 0) ||
+        (s->enforced_encryption >= 0 && libsrtm_setsockopt(h, fd, SRTO_STRICTENC, "SRTO_STRICTENC", &s->enforced_encryption, sizeof(s->enforced_encryption)) < 0) ||
 #endif
-        (s->kmrefreshrate >= 0 && libsrt_setsockopt(h, fd, SRTO_KMREFRESHRATE, "SRTO_KMREFRESHRATE", &s->kmrefreshrate, sizeof(s->kmrefreshrate)) < 0) ||
-        (s->kmpreannounce >= 0 && libsrt_setsockopt(h, fd, SRTO_KMPREANNOUNCE, "SRTO_KMPREANNOUNCE", &s->kmpreannounce, sizeof(s->kmpreannounce)) < 0) ||
-        (s->snddropdelay  >=-1 && libsrt_setsockopt(h, fd, SRTO_SNDDROPDELAY,  "SRTO_SNDDROPDELAY",  &snddropdelay, sizeof(snddropdelay)) < 0) ||
+        (s->kmrefreshrate >= 0 && libsrtm_setsockopt(h, fd, SRTO_KMREFRESHRATE, "SRTO_KMREFRESHRATE", &s->kmrefreshrate, sizeof(s->kmrefreshrate)) < 0) ||
+        (s->kmpreannounce >= 0 && libsrtm_setsockopt(h, fd, SRTO_KMPREANNOUNCE, "SRTO_KMPREANNOUNCE", &s->kmpreannounce, sizeof(s->kmpreannounce)) < 0) ||
+        (s->snddropdelay  >=-1 && libsrtm_setsockopt(h, fd, SRTO_SNDDROPDELAY,  "SRTO_SNDDROPDELAY",  &snddropdelay, sizeof(snddropdelay)) < 0) ||
 #endif
-        (s->mss >= 0 && libsrt_setsockopt(h, fd, SRTO_MSS, "SRTO_MSS", &s->mss, sizeof(s->mss)) < 0) ||
-        (s->ffs >= 0 && libsrt_setsockopt(h, fd, SRTO_FC, "SRTO_FC", &s->ffs, sizeof(s->ffs)) < 0) ||
-        (s->ipttl >= 0 && libsrt_setsockopt(h, fd, SRTO_IPTTL, "SRTO_IPTTL", &s->ipttl, sizeof(s->ipttl)) < 0) ||
-        (s->iptos >= 0 && libsrt_setsockopt(h, fd, SRTO_IPTOS, "SRTO_IPTOS", &s->iptos, sizeof(s->iptos)) < 0) ||
-        (s->latency >= 0 && libsrt_setsockopt(h, fd, SRTO_LATENCY, "SRTO_LATENCY", &latency, sizeof(latency)) < 0) ||
-        (s->rcvlatency >= 0 && libsrt_setsockopt(h, fd, SRTO_RCVLATENCY, "SRTO_RCVLATENCY", &rcvlatency, sizeof(rcvlatency)) < 0) ||
-        (s->peerlatency >= 0 && libsrt_setsockopt(h, fd, SRTO_PEERLATENCY, "SRTO_PEERLATENCY", &peerlatency, sizeof(peerlatency)) < 0) ||
-        (s->tlpktdrop >= 0 && libsrt_setsockopt(h, fd, SRTO_TLPKTDROP, "SRTO_TLPKTDROP", &s->tlpktdrop, sizeof(s->tlpktdrop)) < 0) ||
-        (s->nakreport >= 0 && libsrt_setsockopt(h, fd, SRTO_NAKREPORT, "SRTO_NAKREPORT", &s->nakreport, sizeof(s->nakreport)) < 0) ||
-        (connect_timeout >= 0 && libsrt_setsockopt(h, fd, SRTO_CONNTIMEO, "SRTO_CONNTIMEO", &connect_timeout, sizeof(connect_timeout)) <0 ) ||
-        (s->sndbuf >= 0 && libsrt_setsockopt(h, fd, SRTO_SNDBUF, "SRTO_SNDBUF", &s->sndbuf, sizeof(s->sndbuf)) < 0) ||
-        (s->lossmaxttl >= 0 && libsrt_setsockopt(h, fd, SRTO_LOSSMAXTTL, "SRTO_LOSSMAXTTL", &s->lossmaxttl, sizeof(s->lossmaxttl)) < 0) ||
-        (s->minversion >= 0 && libsrt_setsockopt(h, fd, SRTO_MINVERSION, "SRTO_MINVERSION", &s->minversion, sizeof(s->minversion)) < 0) ||
-        (s->streamid && libsrt_setsockopt(h, fd, SRTO_STREAMID, "SRTO_STREAMID", s->streamid, strlen(s->streamid)) < 0) ||
+        (s->mss >= 0 && libsrtm_setsockopt(h, fd, SRTO_MSS, "SRTO_MSS", &s->mss, sizeof(s->mss)) < 0) ||
+        (s->ffs >= 0 && libsrtm_setsockopt(h, fd, SRTO_FC, "SRTO_FC", &s->ffs, sizeof(s->ffs)) < 0) ||
+        (s->ipttl >= 0 && libsrtm_setsockopt(h, fd, SRTO_IPTTL, "SRTO_IPTTL", &s->ipttl, sizeof(s->ipttl)) < 0) ||
+        (s->iptos >= 0 && libsrtm_setsockopt(h, fd, SRTO_IPTOS, "SRTO_IPTOS", &s->iptos, sizeof(s->iptos)) < 0) ||
+        (s->latency >= 0 && libsrtm_setsockopt(h, fd, SRTO_LATENCY, "SRTO_LATENCY", &latency, sizeof(latency)) < 0) ||
+        (s->rcvlatency >= 0 && libsrtm_setsockopt(h, fd, SRTO_RCVLATENCY, "SRTO_RCVLATENCY", &rcvlatency, sizeof(rcvlatency)) < 0) ||
+        (s->peerlatency >= 0 && libsrtm_setsockopt(h, fd, SRTO_PEERLATENCY, "SRTO_PEERLATENCY", &peerlatency, sizeof(peerlatency)) < 0) ||
+        (s->tlpktdrop >= 0 && libsrtm_setsockopt(h, fd, SRTO_TLPKTDROP, "SRTO_TLPKTDROP", &s->tlpktdrop, sizeof(s->tlpktdrop)) < 0) ||
+        (s->nakreport >= 0 && libsrtm_setsockopt(h, fd, SRTO_NAKREPORT, "SRTO_NAKREPORT", &s->nakreport, sizeof(s->nakreport)) < 0) ||
+        (connect_timeout >= 0 && libsrtm_setsockopt(h, fd, SRTO_CONNTIMEO, "SRTO_CONNTIMEO", &connect_timeout, sizeof(connect_timeout)) <0 ) ||
+        (s->sndbuf >= 0 && libsrtm_setsockopt(h, fd, SRTO_SNDBUF, "SRTO_SNDBUF", &s->sndbuf, sizeof(s->sndbuf)) < 0) ||
+        (s->lossmaxttl >= 0 && libsrtm_setsockopt(h, fd, SRTO_LOSSMAXTTL, "SRTO_LOSSMAXTTL", &s->lossmaxttl, sizeof(s->lossmaxttl)) < 0) ||
+        (s->minversion >= 0 && libsrtm_setsockopt(h, fd, SRTO_MINVERSION, "SRTO_MINVERSION", &s->minversion, sizeof(s->minversion)) < 0) ||
+        (s->streamid && libsrtm_setsockopt(h, fd, SRTO_STREAMID, "SRTO_STREAMID", s->streamid, strlen(s->streamid)) < 0) ||
 #if SRT_VERSION_VALUE >= 0x010401
-        (s->smoother && libsrt_setsockopt(h, fd, SRTO_CONGESTION, "SRTO_CONGESTION", s->smoother, strlen(s->smoother)) < 0) ||
+        (s->smoother && libsrtm_setsockopt(h, fd, SRTO_CONGESTION, "SRTO_CONGESTION", s->smoother, strlen(s->smoother)) < 0) ||
 #else
-        (s->smoother && libsrt_setsockopt(h, fd, SRTO_SMOOTHER, "SRTO_SMOOTHER", s->smoother, strlen(s->smoother)) < 0) ||
+        (s->smoother && libsrtm_setsockopt(h, fd, SRTO_SMOOTHER, "SRTO_SMOOTHER", s->smoother, strlen(s->smoother)) < 0) ||
 #endif
-        (s->messageapi >= 0 && libsrt_setsockopt(h, fd, SRTO_MESSAGEAPI, "SRTO_MESSAGEAPI", &s->messageapi, sizeof(s->messageapi)) < 0) ||
-        (s->payload_size >= 0 && libsrt_setsockopt(h, fd, SRTO_PAYLOADSIZE, "SRTO_PAYLOADSIZE", &s->payload_size, sizeof(s->payload_size)) < 0) ||
-        ((h->flags & AVIO_FLAG_WRITE) && libsrt_setsockopt(h, fd, SRTO_SENDER, "SRTO_SENDER", &yes, sizeof(yes)) < 0) ||
-        (s->tsbpd >= 0 && libsrt_setsockopt(h, fd, SRTO_TSBPDMODE, "SRTO_TSBPDMODE", &s->tsbpd, sizeof(s->tsbpd)) < 0)) {
+        (s->messageapi >= 0 && libsrtm_setsockopt(h, fd, SRTO_MESSAGEAPI, "SRTO_MESSAGEAPI", &s->messageapi, sizeof(s->messageapi)) < 0) ||
+        (s->payload_size >= 0 && libsrtm_setsockopt(h, fd, SRTO_PAYLOADSIZE, "SRTO_PAYLOADSIZE", &s->payload_size, sizeof(s->payload_size)) < 0) ||
+        ((h->flags & AVIO_FLAG_WRITE) && libsrtm_setsockopt(h, fd, SRTO_SENDER, "SRTO_SENDER", &yes, sizeof(yes)) < 0) ||
+        (s->tsbpd >= 0 && libsrtm_setsockopt(h, fd, SRTO_TSBPDMODE, "SRTO_TSBPDMODE", &s->tsbpd, sizeof(s->tsbpd)) < 0)) {
         return AVERROR(EIO);
     }
 
@@ -315,7 +315,7 @@ static int libsrt_set_options_pre(URLContext *h, int fd)
         struct linger lin;
         lin.l_linger = s->linger;
         lin.l_onoff  = lin.l_linger > 0 ? 1 : 0;
-        if (libsrt_setsockopt(h, fd, SRTO_LINGER, "SRTO_LINGER", &lin, sizeof(lin)) < 0)
+        if (libsrtm_setsockopt(h, fd, SRTO_LINGER, "SRTO_LINGER", &lin, sizeof(lin)) < 0)
             return AVERROR(EIO);
     }
     return 0;
@@ -328,7 +328,7 @@ static int libsrt_set_options_pre(URLContext *h, int fd)
  * @param uri URI
  * @return int 0 on success.
  */
-static int libsrt_create_listen(URLContext *h, const char * uri) {
+static int libsrtm_create_listen(URLContext *h, const char * uri) {
     struct addrinfo hints = { 0 }, *ai, *cur_ai;
     int port, fd;
     SRTContext *s = h->priv_data;
@@ -387,18 +387,18 @@ static int libsrt_create_listen(URLContext *h, const char * uri) {
     fd = srt_socket(cur_ai->ai_family, cur_ai->ai_socktype, 0);
 #endif
     if (fd < 0) {
-        ret = libsrt_neterrno(h);
+        ret = libsrtm_neterrno(h);
         goto fail;
     }
 
-    if ((ret = libsrt_set_options_pre(h, fd)) < 0) {
+    if ((ret = libsrtm_set_options_pre(h, fd)) < 0) {
         goto fail;
     }
 
     {
         int packet_size = 0;
         int optlen = sizeof(packet_size);
-        if (0 > libsrt_getsockopt(h, fd, SRTO_PAYLOADSIZE, "SRTO_PAYLOADSIZE", &packet_size, &optlen)) {
+        if (0 > libsrtm_getsockopt(h, fd, SRTO_PAYLOADSIZE, "SRTO_PAYLOADSIZE", &packet_size, &optlen)) {
             goto fail;
         }
         if (packet_size > 0) {
@@ -409,10 +409,10 @@ static int libsrt_create_listen(URLContext *h, const char * uri) {
     if (s->send_buffer_size > 0) {
         srt_setsockopt(fd, SOL_SOCKET, SRTO_UDP_SNDBUF, &s->send_buffer_size, sizeof (s->send_buffer_size));
     }
-    if (libsrt_socket_nonblock(fd, 1) < 0)
-        av_log(h, AV_LOG_WARNING, "libsrt_socket_nonblock failed\n");
+    if (libsrtm_socket_nonblock(fd, 1) < 0)
+        av_log(h, AV_LOG_WARNING, "libsrtm_socket_nonblock failed\n");
 
-    ret = libsrt_epoll_create(h, fd);
+    ret = libsrtm_epoll_create(h, fd);
     if (ret < 0)
         goto fail1;
 
@@ -423,10 +423,10 @@ static int libsrt_create_listen(URLContext *h, const char * uri) {
         av_log(h, AV_LOG_WARNING, "setsockopt(SRTO_REUSEADDR) failed\n");
     }
     if (srt_bind(fd, cur_ai->ai_addr, cur_ai->ai_addrlen))
-        return libsrt_neterrno(h);
+        return libsrtm_neterrno(h);
 
     if (srt_listen(fd, s->threads))
-        return libsrt_neterrno(h);
+        return libsrtm_neterrno(h);
 
     freeaddrinfo(ai);
 
@@ -459,7 +459,7 @@ static int libsrt_create_listen(URLContext *h, const char * uri) {
  * @param data URLContext pointer
  * @return NULL
  */
-static void * libsrt_thread_listener(void * data)
+static void * libsrtm_thread_listener(void * data)
 {
     URLContext * h = data;
     SRTContext * s = h->priv_data;
@@ -485,7 +485,7 @@ static void * libsrt_thread_listener(void * data)
         if (0 > ret) {
             if (srt_getlasterror(NULL) != SRT_ETIMEOUT) {
                 av_log(h, AV_LOG_ERROR, "%s(): srt_epoll_wait() error!\n", __FUNCTION__);
-                libsrt_neterrno(h);
+                libsrtm_neterrno(h);
             }
             continue;
         }
@@ -502,22 +502,22 @@ static void * libsrt_thread_listener(void * data)
                     ret = srt_accept(s->fd, (struct sockaddr *)&addr, &len);
                     if (ret < 0) {
                         av_log(h, AV_LOG_ERROR, "%s() error on srt_accept()!\n", __FUNCTION__);
-                        libsrt_neterrno(h);
+                        libsrtm_neterrno(h);
                         break;
                     } else {
                         char buf[1024];
                         getnameinfo((struct sockaddr *)&addr, len, buf, 1024, NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV);
                         av_log(h, AV_LOG_WARNING, "%s() accepted \'%s:%d\'.\n", __FUNCTION__, buf, ntohs(addr.sin_port));
                     }
-                    if (0 > libsrt_set_options_post(h, ret)) {
-                        av_log(h, AV_LOG_WARNING, "libsrt_set_options_post() failed!\n");
+                    if (0 > libsrtm_set_options_post(h, ret)) {
+                        av_log(h, AV_LOG_WARNING, "libsrtm_set_options_post() failed!\n");
                     }
-                    if (0 > libsrt_socket_nonblock(ret, 1)) {
-                        av_log(h, AV_LOG_WARNING, "libsrt_socket_nonblock() failed!\n");
+                    if (0 > libsrtm_socket_nonblock(ret, 1)) {
+                        av_log(h, AV_LOG_WARNING, "libsrtm_socket_nonblock() failed!\n");
                     }
-                    if (!libsrt_getsockopt(h, ret, SRTO_STREAMID, "SRTO_STREAMID", streamid, &streamid_len))
+                    if (!libsrtm_getsockopt(h, ret, SRTO_STREAMID, "SRTO_STREAMID", streamid, &streamid_len))
                         av_log(h, AV_LOG_VERBOSE, "accept streamid [%s], length %d\n", streamid, streamid_len);
-                    libsrt_set_options_post(h, ret);
+                    libsrtm_set_options_post(h, ret);
 
                     if (threads_cnt == s->threads) {
                         //Close an accepted one if there is no space.
@@ -576,7 +576,7 @@ static void * libsrt_thread_listener(void * data)
  * @param data URLContext pointer
  * @return NULL
  */
-static void * libsrt_thread_loop(void * data)
+static void * libsrtm_thread_loop(void * data)
 {
     URLContext * h = data;
     SRTContext * s = h->priv_data;
@@ -593,7 +593,7 @@ static void * libsrt_thread_loop(void * data)
  * @param data SRTWriter pointer
  * @return NULL
  */
-static void * libsrt_thread_writer(void * data)
+static void * libsrtm_thread_writer(void * data)
 {
     SRTWriter * me = data;
     URLContext * h = me->ctx;
@@ -661,12 +661,12 @@ static void * libsrt_thread_writer(void * data)
 }
 
 /**
- * @brief Waits for incoming packets from libsrt_write() in the main FIFO. Puts them to individual buffers of each writer.
+ * @brief Waits for incoming packets from libsrtm_write() in the main FIFO. Puts them to individual buffers of each writer.
  *
  * @param data URLContext pointer
  * @return NULL
  */
-static void * libsrt_thread_buf(void * data)
+static void * libsrtm_thread_buf(void * data)
 {
     URLContext * h = data;
     SRTContext * s = h->priv_data;
@@ -723,7 +723,7 @@ static void * libsrt_thread_buf(void * data)
     return NULL;
 }
 
-static int libsrt_open(URLContext *h, const char *uri, int flags)
+static int libsrtm_open(URLContext *h, const char *uri, int flags)
 {
     SRTContext *s = h->priv_data;
     const char * p;
@@ -883,8 +883,8 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
     if (SRT_LL_INVALID != s->loglevel) {
         srt_setloglevel(s->loglevel);
     }
-    pthread_create(&s->thread_loop, NULL, libsrt_thread_loop, h);
-    ret = libsrt_create_listen(h, uri);
+    pthread_create(&s->thread_loop, NULL, libsrtm_thread_loop, h);
+    ret = libsrtm_create_listen(h, uri);
     if (ret < 0)
       goto err;
 
@@ -900,7 +900,7 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
             gpointer bucket = g_malloc0(SRT_BUCKET_VOLUME);
             g_async_queue_push(one->pool, bucket);
         }
-        one->thread = g_thread_new("Writer thread", libsrt_thread_writer, one);
+        one->thread = g_thread_new("Writer thread", libsrtm_thread_writer, one);
     }
 
     s->q    = g_async_queue_new_full(g_nonfree);
@@ -909,8 +909,8 @@ static int libsrt_open(URLContext *h, const char *uri, int flags)
         gpointer bucket = g_malloc0(SRT_BUCKET_VOLUME);
         g_async_queue_push(s->pool, bucket);
     }
-    s->thread_buf      = g_thread_new("Main buffer thread", libsrt_thread_buf, h);
-    s->thread_listener = g_thread_new("Listener thread", libsrt_thread_listener, h);
+    s->thread_buf      = g_thread_new("Main buffer thread", libsrtm_thread_buf, h);
+    s->thread_listener = g_thread_new("Listener thread", libsrtm_thread_listener, h);
 
     h->is_streamed = 1;
 
@@ -928,7 +928,7 @@ err:
     return ret;
 }
 
-static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
+static int libsrtm_write(URLContext *h, const uint8_t *buf, int size)
 {
     SRTContext *s = h->priv_data;
     int ret;
@@ -949,7 +949,7 @@ static int libsrt_write(URLContext *h, const uint8_t *buf, int size)
     return ret;
 }
 
-static int libsrt_close(URLContext *h)
+static int libsrtm_close(URLContext *h)
 {
     SRTContext *s = h->priv_data;
 
@@ -987,9 +987,9 @@ static const AVClass libsrtm_class = {
 
 const URLProtocol ff_libsrtm_protocol = {
     .name                = "srtm",
-    .url_open            = libsrt_open,
-    .url_write           = libsrt_write,
-    .url_close           = libsrt_close,
+    .url_open            = libsrtm_open,
+    .url_write           = libsrtm_write,
+    .url_close           = libsrtm_close,
     .priv_data_size      = sizeof(SRTContext),
     .flags               = URL_PROTOCOL_FLAG_NETWORK,
     .priv_data_class     = &libsrtm_class,

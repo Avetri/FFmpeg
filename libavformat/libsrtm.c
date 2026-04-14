@@ -80,6 +80,7 @@ typedef struct SRTWriter {
   unsigned int idx;
   URLContext * ctx;
   SRTSOCKET fd;
+  int port;
   GAsyncQueue * q;
   GAsyncQueue * pool;
   GThread * thread;
@@ -87,6 +88,7 @@ typedef struct SRTWriter {
 
 typedef struct SRTContext {
     const AVClass *class;
+    int port;
     int fd;
     int eid;
     int64_t rw_timeout;
@@ -351,6 +353,7 @@ static int libsrtm_create_listen(URLContext *h, const char * uri) {
         av_log(h, AV_LOG_ERROR, "Port missing in uri\n");
         return AVERROR(EINVAL);
     }
+    s->port = port;
     p = strchr(uri, '?');
     if (p) {
         if (av_find_info_tag(buf, sizeof(buf), "timeout", p)) {
@@ -430,7 +433,7 @@ static int libsrtm_create_listen(URLContext *h, const char * uri) {
 
     freeaddrinfo(ai);
 
-    av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
+    av_log(h, AV_LOG_WARNING, "%s() for port %d end.\n", __FUNCTION__, s->port);
 
     return 0;
 
@@ -447,7 +450,7 @@ static int libsrtm_create_listen(URLContext *h, const char * uri) {
         srt_close(fd);
     freeaddrinfo(ai);
 
-    av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
+    av_log(h, AV_LOG_ERROR, "%s() for port %d failed.\n", __FUNCTION__, s->port);
 
     return ret;
 }
@@ -468,13 +471,13 @@ static void * libsrtm_thread_listener(void * data)
     SRTSOCKET * readfds = malloc(sizeof(SRTSOCKET) * (readfds_len+1));
     unsigned int threads_cnt = 0;
 
-    av_log(h, AV_LOG_WARNING, "%s() start.\n", __FUNCTION__);
+    av_log(h, AV_LOG_WARNING, "%s() for port %d start.\n", __FUNCTION__, s->port);
 
     // Don't wait for a signal for closing.
     while (0 == s->evac) {
 
         if (ff_check_interrupt(&h->interrupt_callback)) {
-            av_log(h, AV_LOG_WARNING, "%s(): stop on an interrupt.\n", __FUNCTION__);
+            av_log(h, AV_LOG_WARNING, "%s(), port %d: stop on an interrupt.\n", __FUNCTION__, s->port);
             s->evac = 1;
             continue;
         }
@@ -484,7 +487,7 @@ static void * libsrtm_thread_listener(void * data)
         ret = srt_epoll_wait(s->eid, readfds, &readfds_len, NULL, NULL, POLLING_TIME, 0, 0, 0, 0);
         if (0 > ret) {
             if (srt_getlasterror(NULL) != SRT_ETIMEOUT) {
-                av_log(h, AV_LOG_ERROR, "%s(): srt_epoll_wait() error!\n", __FUNCTION__);
+                av_log(h, AV_LOG_ERROR, "%s(), port %d: srt_epoll_wait() error!\n", __FUNCTION__, s->port);
                 libsrtm_neterrno(h);
             }
             continue;
@@ -501,27 +504,27 @@ static void * libsrtm_thread_listener(void * data)
                     int streamid_len = sizeof(streamid);
                     ret = srt_accept(s->fd, (struct sockaddr *)&addr, &len);
                     if (ret < 0) {
-                        av_log(h, AV_LOG_ERROR, "%s() error on srt_accept()!\n", __FUNCTION__);
+                        av_log(h, AV_LOG_ERROR, "%s(), port %d: error on srt_accept()!\n", __FUNCTION__, s->port);
                         libsrtm_neterrno(h);
                         break;
                     } else {
                         char buf[1024];
                         getnameinfo((struct sockaddr *)&addr, len, buf, 1024, NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV);
-                        av_log(h, AV_LOG_WARNING, "%s() accepted \'%s:%d\'.\n", __FUNCTION__, buf, ntohs(addr.sin_port));
+                        av_log(h, AV_LOG_WARNING, "%s(), port %d: accepted \'%s:%d\'.\n", __FUNCTION__, s->port, buf, ntohs(addr.sin_port));
                     }
                     if (0 > libsrtm_set_options_post(h, ret)) {
-                        av_log(h, AV_LOG_WARNING, "libsrtm_set_options_post() failed!\n");
+                        av_log(h, AV_LOG_WARNING, "%s(), port %d: libsrtm_set_options_post() failed!\n", __FUNCTION__, s->port);
                     }
                     if (0 > libsrtm_socket_nonblock(ret, 1)) {
-                        av_log(h, AV_LOG_WARNING, "libsrtm_socket_nonblock() failed!\n");
+                        av_log(h, AV_LOG_WARNING, "%s(), port %d: libsrtm_socket_nonblock() failed!\n", __FUNCTION__, s->port);
                     }
                     if (!libsrtm_getsockopt(h, ret, SRTO_STREAMID, "SRTO_STREAMID", streamid, &streamid_len))
-                        av_log(h, AV_LOG_VERBOSE, "accept streamid [%s], length %d\n", streamid, streamid_len);
+                        av_log(h, AV_LOG_VERBOSE, "%s(), port %d: accept streamid [%s], length %d\n", __FUNCTION__, s->port, streamid, streamid_len);
                     libsrtm_set_options_post(h, ret);
 
                     if (threads_cnt == s->threads) {
                         //Close an accepted one if there is no space.
-                        av_log(h, AV_LOG_WARNING, "%s() close an accepted socket because there is no place for it.\n", __FUNCTION__);
+                        av_log(h, AV_LOG_WARNING, "%s(), port %d: close an accepted socket because there is no place for it.\n", __FUNCTION__, s->port);
                         srt_close(ret);
                     } else {
                         //Find an empty writer
@@ -534,7 +537,7 @@ static void * libsrtm_thread_listener(void * data)
                                 continue;
                             }
                             //Fill an empty writer
-                            av_log(h, AV_LOG_WARNING, "%s() writer %d shell accept the new connection.\n", __FUNCTION__, one->idx);
+                            av_log(h, AV_LOG_WARNING, "%s(), port %d: writer %d shell accept the new connection.\n", __FUNCTION__, s->port, one->idx);
                             srt_epoll_update_usock(s->eid, ret, &modes);
                             one->fd = ret;
                             threads_cnt += 1;
@@ -549,7 +552,7 @@ static void * libsrtm_thread_listener(void * data)
                     for (int j = 0; j < s->threads; j++) {
                         SRTWriter * one = s->writers+j;
                         if (readfds[i] == one->fd) {
-                            av_log(h, AV_LOG_ERROR, "%s(): writer %d shell disconnect on its socket error event!\n", __FUNCTION__, one->idx);
+                            av_log(h, AV_LOG_ERROR, "%s(), port %d: writer %d shell disconnect on its socket error event!\n", __FUNCTION__, s->port, one->idx);
                             srt_epoll_remove_usock(s->eid, one->fd);
                             srt_close(one->fd);
                             one->fd = -1;
@@ -565,7 +568,7 @@ static void * libsrtm_thread_listener(void * data)
     srt_epoll_release(s->eid);
     srt_close(s->fd);
 
-    av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
+    av_log(h, AV_LOG_WARNING, "%s() for port %d end.\n", __FUNCTION__, s->port);
 
     return NULL;
 }
@@ -602,7 +605,7 @@ static void * libsrtm_thread_writer(void * data)
     gchar * bucket = NULL;
     int size       = 0;
 
-    av_log(h, AV_LOG_WARNING, "%s() start writer %d.\n", __FUNCTION__, me->idx);
+    av_log(h, AV_LOG_WARNING, "%s(), port %d: start writer %d.\n", __FUNCTION__, me->port, me->idx);
 
     while (alive) {
         if (0 == size) {
@@ -612,17 +615,17 @@ static void * libsrtm_thread_writer(void * data)
             }
 
             if (0 == memcmp(CMD_STOP, bucket, sizeof CMD_STOP)) {
-                av_log(h, AV_LOG_WARNING, "%s() writer %d got \"%s\" command.\n", __FUNCTION__, me->idx, bucket);
+                av_log(h, AV_LOG_WARNING, "%s(), port %d: writer %d got \"%s\" command.\n", __FUNCTION__, me->port, me->idx, bucket);
                 alive = FALSE;
                 continue;
             }
             if (0 == memcmp(CMD_CONNECTED, bucket, sizeof CMD_CONNECTED)) {
-                av_log(h, AV_LOG_WARNING, "%s() writer %d got \"%s\" command.\n", __FUNCTION__, me->idx, bucket);
+                av_log(h, AV_LOG_WARNING, "%s(), port %d: writer %d got \"%s\" command.\n", __FUNCTION__, me->port, me->idx, bucket);
                 conn = TRUE;
                 continue;
             }
             if (0 == memcmp(CMD_DISCONNECTED, bucket, sizeof CMD_DISCONNECTED)) {
-                av_log(h, AV_LOG_WARNING, "%s() writer %d got \"%s\" command.\n", __FUNCTION__, me->idx, bucket);
+                av_log(h, AV_LOG_WARNING, "%s(), port %d: writer %d got \"%s\" command.\n", __FUNCTION__, me->port, me->idx, bucket);
                 conn = FALSE;
                 continue;
             }
@@ -655,7 +658,7 @@ static void * libsrtm_thread_writer(void * data)
         size = 0;
     }
 
-    av_log(h, AV_LOG_WARNING, "%s() end writer %d.\n", __FUNCTION__, me->idx);
+    av_log(h, AV_LOG_WARNING, "%s(), port %d: end writer %d.\n", __FUNCTION__, me->port, me->idx);
 
     return NULL;
 }
@@ -674,7 +677,7 @@ static void * libsrtm_thread_buf(void * data)
     gboolean alive = TRUE;
     gchar * bucket = NULL;
 
-    av_log(h, AV_LOG_WARNING, "%s() start.\n", __FUNCTION__);
+    av_log(h, AV_LOG_WARNING, "%s() for port %d start.\n", __FUNCTION__, s->port);
 
     while (alive) {
 
@@ -706,7 +709,7 @@ static void * libsrtm_thread_buf(void * data)
             SRTWriter * one = s->writers+k;
             gchar * sink = g_async_queue_try_pop(one->pool);
             if (NULL == sink) {
-                av_log(h, AV_LOG_WARNING, "%s() %d writer's pool is empty!\n", __FUNCTION__, one->idx);
+                av_log(h, AV_LOG_WARNING, "%s(), port %d: %d writer's pool is empty!\n", __FUNCTION__, s->port, one->idx);
                 continue;
             }
             memcpy(sink, bucket, size+2);
@@ -718,7 +721,7 @@ static void * libsrtm_thread_buf(void * data)
         size = 0;
     }
 
-    av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
+    av_log(h, AV_LOG_WARNING, "%s() for port %d end.\n", __FUNCTION__, s->port);
 
     return NULL;
 }
@@ -894,6 +897,7 @@ static int libsrtm_open(URLContext *h, const char *uri, int flags)
         one->ctx = h;
         one->idx = i;
         one->fd = -1;
+        one->port = s->port;
         one->q    = g_async_queue_new_full(g_nonfree);
         one->pool = g_async_queue_new_full(g_nonfree);
         for (int k=0; k<SRT_QUEUE_LENGTH; k++) {
@@ -914,7 +918,7 @@ static int libsrtm_open(URLContext *h, const char *uri, int flags)
 
     h->is_streamed = 1;
 
-    av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
+    av_log(h, AV_LOG_WARNING, "%s(), port %d: end.\n", __FUNCTION__, s->port);
 
     return 0;
 
@@ -923,7 +927,7 @@ err:
     av_freep(&s->streamid);
     srt_cleanup();
 
-    av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
+    av_log(h, AV_LOG_ERROR, "%s(), port %d: failed.\n", __FUNCTION__, s->port);
 
     return ret;
 }
@@ -943,7 +947,7 @@ static int libsrtm_write(URLContext *h, const uint8_t *buf, int size)
         memcpy(((gchar *)bucket)+2, buf, size);
         g_async_queue_push(s->q, bucket);
     } else {
-        av_log(h, AV_LOG_WARNING, "%s(): Pool is empty!\n", __FUNCTION__);
+        av_log(h, AV_LOG_WARNING, "%s(), port %d: Pool is empty!\n", __FUNCTION__, s->port);
     }
     ret = size;
     return ret;
@@ -952,8 +956,9 @@ static int libsrtm_write(URLContext *h, const uint8_t *buf, int size)
 static int libsrtm_close(URLContext *h)
 {
     SRTContext *s = h->priv_data;
+    int port = s->port;
 
-    av_log(h, AV_LOG_WARNING, "%s() start.\n", __FUNCTION__);
+    av_log(h, AV_LOG_WARNING, "%s(), port %d: start.\n", __FUNCTION__, port);
 
     // Finish buffering.
     s->evac = 1;
@@ -973,7 +978,7 @@ static int libsrtm_close(URLContext *h)
     g_main_loop_quit(s->loop);
     pthread_join(s->thread_loop, NULL);
 
-    av_log(h, AV_LOG_WARNING, "%s() end.\n", __FUNCTION__);
+    av_log(h, AV_LOG_WARNING, "%s(), port %d: end.\n", __FUNCTION__, port);
 
     return 0;
 }

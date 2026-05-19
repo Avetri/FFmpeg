@@ -96,23 +96,31 @@ static av_cold void uninit(AVFilterContext *ctx)
     }
 }
 
+static void recalc_rate(ClockS12mTcContext *s, AVRational rate)
+{
+    s->d_rate = (double)s->rate.num/(double)s->rate.den;
+    s->frame_us = (1000000*s->rate.den)/s->rate.num;
+    s->frame_max_us = s->frame_us*3/2;
+    s->frame_min_us = s->frame_us*2/3;
+    s->day_frames = (int)(60.0*60.0*24.0*s->d_rate);
+}
+
 static int config_props(AVFilterLink *inlink)
 {
     AVFilterContext *ctx = inlink->dst;
     ClockS12mTcContext *s = ctx->priv;
 
     s->rate = inlink->frame_rate;
-    av_assert0(0 != s->rate.den);
-    s->d_rate = (double)s->rate.num/(double)s->rate.den;
-    s->frame_us = (1000000*s->rate.den)/s->rate.num;
-    s->frame_max_us = s->frame_us*3/2;
-    s->frame_min_us = s->frame_us*2/3;
-    s->day_frames = (int)(60.0*60.0*24.0*s->d_rate);
+    if (0 != s->rate.den) {
+        recalc_rate(s, s->rate);
+    } else {
+        av_log(ctx, AV_LOG_ERROR, "frame rate denominator is zero!\n");
+    }
     s->ts_last_us = LLONG_MAX;
     s->current_frame_raw = INT_MAX;
 
-    av_log(ctx, AV_LOG_DEBUG, "frame_rate: %f replace_tc:%d local_time:%d shift_ms:%d\n",
-            av_q2d(s->rate), s->replace_tc, s->local_time, s->shift_ms);
+    av_log(ctx, AV_LOG_VERBOSE, "frame rate: %d/%d replace_tc:%d local_time:%d shift_ms:%d\n",
+            s->rate.num, s->rate.den, s->replace_tc, s->local_time, s->shift_ms);
     return 0;
 }
 
@@ -132,6 +140,19 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     time_t ts_s = (time_t)ts_us/1000000ll;
     int32_t dtime_cur_s;
     int64_t dtime_cur_us;
+    if (0 != av_cmp_q(s->rate, inlink->frame_rate))
+    {
+        av_log(ctx, AV_LOG_VERBOSE, "frame rate changed from %d/%d to %d/%d.\n", s->rate.num, s->rate.den, inlink->frame_rate.num, inlink->frame_rate.den);
+        s->rate = inlink->frame_rate;
+        if (0 != s->rate.den) {
+            recalc_rate(s, s->rate);
+        } else {
+            av_log(ctx, AV_LOG_ERROR, "frame rate denominator is zero!\n");
+        }
+    }
+    if (0 == s->rate.den) {
+        return ff_filter_frame(outlink, frame);
+    }
     {
         struct tm tm;
         gmtime_r(&ts_s, &tm);

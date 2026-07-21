@@ -150,7 +150,7 @@ private:
 class decklink_buffer : public IDeckLinkVideoBuffer
 {
 public:
-        decklink_buffer(void *buf): _refs(1) { this->buf = buf; }
+        decklink_buffer(void *buf, uint64_t size): _refs(1) { this->buf = buf; this->size = size;}
         virtual ~decklink_buffer()
         {
             if (nullptr != buf)
@@ -168,6 +168,13 @@ public:
             *buffer = buf;
             return S_OK;
         }
+#if BLACKMAGIC_DECKLINK_API_VERSION >= 0x10000000
+        virtual HRESULT STDMETHODCALLTYPE GetSize(uint64_t* size)
+        {
+            *size = this->size;
+            return S_OK;
+        }
+#endif
            virtual HRESULT     STDMETHODCALLTYPE StartAccess(BMDBufferAccessFlags flags) { return S_OK; }
            virtual HRESULT     STDMETHODCALLTYPE EndAccess(BMDBufferAccessFlags flags) { return S_OK; }
 
@@ -211,6 +218,7 @@ public:
 private:
         std::atomic<int>  _refs;
         void *buf;
+        uint64_t size;
 };
 
 class decklink_allocator : public IDeckLinkVideoBufferAllocator
@@ -230,7 +238,7 @@ public:
             void *buf = av_malloc(buffer_size + AV_INPUT_BUFFER_PADDING_SIZE);
             if (nullptr == buf)
                 return E_OUTOFMEMORY;
-            *allocatedBuffer = new decklink_buffer(buf);
+            *allocatedBuffer = new decklink_buffer(buf, buffer_size + AV_INPUT_BUFFER_PADDING_SIZE);
             if (nullptr == *allocatedBuffer)
             {
                 av_free(buf);
